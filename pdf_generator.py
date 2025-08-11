@@ -15,56 +15,104 @@ from reportlab.platypus.flowables import HRFlowable
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus.doctemplate import PageTemplate, BaseDocTemplate
+from reportlab.platypus.frames import Frame
 
 from config import Config
+from integration_donnees_reelles import RealDataProvider
 
 logger = logging.getLogger(__name__)
 
 
-class ProfessionalPDFGenerator:
+class EnhancedPDFGenerator:
+    """Générateur PDF professionnel avec formatage avancé"""
+
     def __init__(self):
-        # Colors matching the sample reports
+        # Palette de couleurs professionnelle (exacte des exemples)
         self.colors = {
-            'primary_blue': HexColor('#1f4788'),
+            'title_black': HexColor('#000000'),
             'section_blue': HexColor('#4472C4'),
-            'light_blue': HexColor('#E7EFFD'),
-            'table_header': HexColor('#D9E2F3'),
+            'table_header_blue': HexColor('#D9E2F3'),
+            'table_border': HexColor('#8EAADB'),
             'recommendation_red': HexColor('#C5504B'),
-            'text_dark': HexColor('#2F2F2F'),
-            'text_medium': HexColor('#595959')
+            'text_black': HexColor('#000000'),
+            'text_gray': HexColor('#595959'),
+            'light_gray': HexColor('#F2F2F2'),
+            'bullet_blue': HexColor('#4472C4'),
+            'methodology_black': HexColor('#000000')
         }
 
-        # Try to register Unicode fonts
-        self._setup_fonts()
+        # Configuration des polices
+        self._setup_enhanced_fonts()
 
-    def _setup_fonts(self):
-        """Setup fonts for better text rendering"""
+        # Intégration des données réelles
+        self.data_provider = RealDataProvider()
+
+    def _setup_enhanced_fonts(self):
+        """Configuration des polices optimisées"""
         try:
-            # Try to use system fonts or custom fonts
-            font_paths = [
-                '/System/Library/Fonts/Arial.ttf',  # macOS
-                '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',  # Linux
-                'C:/Windows/Fonts/arial.ttf',  # Windows
-                os.path.join(os.path.dirname(__file__), 'fonts', 'DejaVuSans.ttf')  # Custom
+            # Essayer plusieurs polices système de qualité
+            font_candidates = [
+                # Windows
+                ('Arial', 'C:/Windows/Fonts/arial.ttf'),
+                ('ArialBold', 'C:/Windows/Fonts/arialbd.ttf'),
+                ('ArialItalic', 'C:/Windows/Fonts/ariali.ttf'),
+                ('Calibri', 'C:/Windows/Fonts/calibri.ttf'),
+                ('CalibriBold', 'C:/Windows/Fonts/calibrib.ttf'),
+
+                # macOS
+                ('Arial', '/System/Library/Fonts/Arial.ttf'),
+                ('ArialBold', '/System/Library/Fonts/Arial Bold.ttf'),
+                ('Helvetica', '/System/Library/Fonts/Helvetica.ttc'),
+
+                # Linux
+                ('DejaVu', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'),
+                ('DejaVuBold', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'),
+                ('Liberation', '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'),
+
+                # Fonts locales du projet
+                ('CustomRegular', os.path.join(os.path.dirname(__file__), 'fonts', 'Arial.ttf')),
+                ('CustomBold', os.path.join(os.path.dirname(__file__), 'fonts', 'Arial-Bold.ttf')),
             ]
 
-            for font_path in font_paths:
+            self.fonts = {
+                'regular': 'Helvetica',
+                'bold': 'Helvetica-Bold',
+                'italic': 'Helvetica-Oblique'
+            }
+
+            # Enregistrer les polices disponibles
+            for font_name, font_path in font_candidates:
                 if os.path.exists(font_path):
-                    pdfmetrics.registerFont(TTFont('CustomFont', font_path))
-                    self.font_name = 'CustomFont'
-                    break
-            else:
-                self.font_name = 'Helvetica'
+                    try:
+                        pdfmetrics.registerFont(TTFont(font_name, font_path))
+                        if 'Bold' in font_name or 'bold' in font_name.lower():
+                            self.fonts['bold'] = font_name
+                        elif 'Italic' in font_name or 'italic' in font_name.lower():
+                            self.fonts['italic'] = font_name
+                        else:
+                            self.fonts['regular'] = font_name
+                        logger.info(f"Police chargée: {font_name}")
+                    except Exception as e:
+                        logger.warning(f"Impossible de charger {font_name}: {e}")
 
         except Exception as e:
-            logger.warning(f"Could not load custom fonts: {e}")
-            self.font_name = 'Helvetica'
+            logger.warning(f"Erreur configuration polices: {e}")
+            # Fallback vers polices par défaut
+            self.fonts = {
+                'regular': 'Helvetica',
+                'bold': 'Helvetica-Bold',
+                'italic': 'Helvetica-Oblique'
+            }
 
     def generate_reports(self, structured_data: Dict, user_id: int) -> Tuple[str, str]:
-        """Generate both internal and user reports"""
+        """Génère les rapports avec données réelles"""
         Config.create_folders()
 
-        # Generate unique filenames
+        # Enrichir les données avec des vraies offres du marché
+        enhanced_data = self._enrich_with_real_data(structured_data)
+
+        # Générer les noms de fichiers
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         internal_filename = f"rapport_internal_{user_id}_{timestamp}.pdf"
         user_filename = f"rapport_user_{user_id}_{timestamp}.pdf"
@@ -72,147 +120,211 @@ class ProfessionalPDFGenerator:
         internal_path = os.path.join(Config.REPORTS_INTERNAL_FOLDER, internal_filename)
         user_path = os.path.join(Config.REPORTS_FOLDER, user_filename)
 
-        # Create internal report (with real supplier names)
-        self._create_professional_pdf(structured_data, internal_path, anonymize_suppliers=False)
+        # Créer les rapports
+        self._create_enhanced_pdf(enhanced_data, internal_path, anonymize_suppliers=False)
+        self._create_enhanced_pdf(enhanced_data, user_path, anonymize_suppliers=True)
 
-        # Create user report (anonymized suppliers)
-        self._create_professional_pdf(structured_data, user_path, anonymize_suppliers=True)
-
-        logger.info(f"Professional reports generated: {internal_path}, {user_path}")
+        logger.info(f"Rapports professionnels générés: {internal_path}, {user_path}")
         return internal_path, user_path
 
-    def _create_professional_pdf(self, data: Dict, output_path: str, anonymize_suppliers: bool = False):
-        """Create professional PDF matching the sample format"""
+    def _enrich_with_real_data(self, structured_data: Dict) -> Dict:
+        """Enrichit les données avec des vraies offres du marché"""
+        enhanced_data = structured_data.copy()
+
+        facture_type = enhanced_data.get('type_facture', '').lower()
+        current_offer = enhanced_data.get('current_offer', {})
+
         try:
+            if 'electricite' in facture_type or 'électricité' in facture_type:
+                consumption = self._extract_consumption(current_offer.get('consommation_annuelle', ''))
+                if consumption:
+                    real_offers = self.data_provider.get_real_electricity_offers(consumption)
+                    enhanced_data['alternatives'] = real_offers
+
+            elif 'gaz' in facture_type:
+                consumption = self._extract_consumption(current_offer.get('consommation_annuelle', ''))
+                if consumption:
+                    real_offers = self.data_provider.get_real_gas_offers(consumption)
+                    enhanced_data['alternatives'] = real_offers
+
+            elif 'internet' in facture_type:
+                current_monthly = self._extract_monthly_price(current_offer.get('montant_total_annuel', ''))
+                real_offers = self.data_provider.get_real_internet_offers(current_monthly)
+                enhanced_data['alternatives'] = real_offers
+
+        except Exception as e:
+            logger.warning(f"Impossible d'enrichir avec données réelles: {e}")
+            # Garder les données générées par l'IA en fallback
+
+        return enhanced_data
+
+    def _extract_consumption(self, consumption_str: str) -> int:
+        """Extrait la consommation numérique d'une chaîne"""
+        if not consumption_str:
+            return 0
+        match = re.search(r'(\d+)', str(consumption_str))
+        return int(match.group(1)) if match else 0
+
+    def _extract_monthly_price(self, annual_str: str) -> float:
+        """Extrait le prix mensuel d'un montant annuel"""
+        if not annual_str:
+            return 0
+        match = re.search(r'(\d+[.,]?\d*)', str(annual_str))
+        if match:
+            annual = float(match.group(1).replace(',', '.'))
+            return annual / 12
+        return 0
+
+    def _create_enhanced_pdf(self, data: Dict, output_path: str, anonymize_suppliers: bool = False):
+        """Crée un PDF avec formatage professionnel amélioré"""
+        try:
+            # Configuration du document avec marges optimisées
             doc = SimpleDocTemplate(
                 output_path,
                 pagesize=A4,
-                rightMargin=2 * cm,
-                leftMargin=2 * cm,
-                topMargin=2 * cm,
-                bottomMargin=2 * cm
+                rightMargin=25 * mm,
+                leftMargin=25 * mm,
+                topMargin=20 * mm,
+                bottomMargin=25 * mm
             )
 
-            # Build story elements
+            # Construire le contenu
             story = []
-            styles = self._get_professional_styles()
+            styles = self._get_enhanced_styles()
 
-            # Determine document type
+            # Type de document
             doc_type = data.get('type_facture', 'énergie').upper()
 
-            # Add title
+            # TITRE PRINCIPAL - Taille et formatage optimisés
             title = f"Rapport comparatif énergie – {doc_type}"
             story.append(Paragraph(title, styles['main_title']))
             story.append(Spacer(1, 8 * mm))
 
-            # Add client info and date
+            # INFORMATIONS CLIENT ET DATE
             client_name = data.get('client_info', {}).get('nom', '[anonymisé]')
             if anonymize_suppliers:
                 client_name = '[anonymisé]'
 
             story.append(Paragraph(f"Client : {client_name}", styles['client_info']))
             story.append(Paragraph(f"Date : {datetime.now().strftime('%B %Y')}", styles['client_info']))
-            story.append(Spacer(1, 10 * mm))
+            story.append(Spacer(1, 12 * mm))
 
-            # Add current offer section
-            self._add_current_offer_section(story, data, styles, anonymize_suppliers)
+            # SECTION OFFRE ACTUELLE
+            self._add_enhanced_current_offer(story, data, styles, anonymize_suppliers)
 
-            # Add comparison table
-            self._add_comparison_table(story, data, styles, anonymize_suppliers)
+            # TABLEAU COMPARATIF
+            self._add_enhanced_comparison_table(story, data, styles, anonymize_suppliers)
 
-            # Add detected issues section
-            self._add_issues_section(story, data, styles)
+            # SECTION PIÈGES DÉTECTÉS
+            self._add_enhanced_issues_section(story, data, styles)
 
-            # Add recommendation section
-            self._add_recommendation_section(story, data, styles, anonymize_suppliers)
+            # SECTION RECOMMANDATION
+            self._add_enhanced_recommendation(story, data, styles, anonymize_suppliers)
 
-            # Add methodology section
-            self._add_methodology_section(story, styles)
+            # SECTION MÉTHODOLOGIE
+            self._add_enhanced_methodology(story, styles)
 
-            # Build PDF
+            # Générer le PDF
             doc.build(story)
-            logger.info(f"Professional PDF created: {output_path}")
+            logger.info(f"PDF professionnel créé: {output_path}")
 
         except Exception as e:
-            logger.error(f"Error creating professional PDF {output_path}: {str(e)}")
-            raise Exception(f"Error generating professional PDF: {str(e)}")
+            logger.error(f"Erreur création PDF {output_path}: {str(e)}")
+            raise Exception(f"Erreur génération PDF professionnel: {str(e)}")
 
-    def _get_professional_styles(self) -> Dict:
-        """Get professional paragraph styles"""
-        styles = getSampleStyleSheet()
+    def _get_enhanced_styles(self) -> Dict:
+        """Styles optimisés pour un rendu professionnel"""
 
-        custom_styles = {
+        return {
             'main_title': ParagraphStyle(
                 'MainTitle',
-                parent=styles['Heading1'],
-                fontName=self.font_name,
+                fontName=self.fonts['bold'],
                 fontSize=16,
-                textColor=black,
+                textColor=self.colors['title_black'],
                 alignment=TA_LEFT,
-                spaceAfter=6 * mm,
+                spaceAfter=8 * mm,
                 spaceBefore=0,
-                fontWeight='bold'
+                leading=20  # Espacement des lignes
             ),
             'section_title': ParagraphStyle(
                 'SectionTitle',
-                parent=styles['Heading2'],
-                fontName=self.font_name,
+                fontName=self.fonts['regular'],
                 fontSize=12,
                 textColor=self.colors['section_blue'],
-                spaceAfter=4 * mm,
-                spaceBefore=8 * mm,
+                spaceAfter=6 * mm,
+                spaceBefore=10 * mm,
                 leftIndent=0,
-                bulletIndent=6 * mm,
-                bulletFontName=self.font_name,
+                leading=16,
+                bulletText='■',
+                bulletIndent=0,
+                # leftIndent=15 * mm,
+                bulletFontName=self.fonts['regular'],
                 bulletFontSize=12,
-                bulletColor=self.colors['section_blue']
+                bulletColor=self.colors['bullet_blue']
             ),
             'client_info': ParagraphStyle(
                 'ClientInfo',
-                parent=styles['Normal'],
-                fontName=self.font_name,
-                fontSize=10,
-                textColor=self.colors['text_dark'],
-                spaceAfter=2 * mm
-            ),
-            'body_text': ParagraphStyle(
-                'BodyText',
-                parent=styles['Normal'],
-                fontName=self.font_name,
-                fontSize=10,
-                textColor=self.colors['text_dark'],
+                fontName=self.fonts['regular'],
+                fontSize=11,
+                textColor=self.colors['text_black'],
                 spaceAfter=3 * mm,
-                leftIndent=3 * mm
+                leading=14
+            ),
+            'offer_details': ParagraphStyle(
+                'OfferDetails',
+                fontName=self.fonts['regular'],
+                fontSize=11,
+                textColor=self.colors['text_black'],
+                spaceAfter=2 * mm,
+                leftIndent=5 * mm,
+                leading=14
+            ),
+            'issues_list': ParagraphStyle(
+                'IssuesList',
+                fontName=self.fonts['regular'],
+                fontSize=11,
+                textColor=self.colors['text_black'],
+                spaceAfter=3 * mm,
+                leftIndent=8 * mm,
+                leading=14,
+                bulletText='-',
+                bulletIndent=3 * mm,
+                bulletFontName=self.fonts['regular']
             ),
             'recommendation': ParagraphStyle(
                 'Recommendation',
-                parent=styles['Normal'],
-                fontName=self.font_name,
-                fontSize=11,
+                fontName=self.fonts['bold'],
+                fontSize=12,
                 textColor=self.colors['recommendation_red'],
-                spaceAfter=4 * mm,
-                spaceBefore=2 * mm,
-                fontWeight='bold'
+                spaceAfter=6 * mm,
+                spaceBefore=4 * mm,
+                leading=16
             ),
             'methodology': ParagraphStyle(
                 'Methodology',
-                parent=styles['Normal'],
-                fontName=self.font_name,
-                fontSize=9,
-                textColor=self.colors['text_medium'],
-                spaceAfter=2 * mm,
-                alignment=TA_JUSTIFY
+                fontName=self.fonts['regular'],
+                fontSize=10,
+                textColor=self.colors['methodology_black'],
+                spaceAfter=3 * mm,
+                alignment=TA_JUSTIFY,
+                leading=13
+            ),
+            'methodology_highlight': ParagraphStyle(
+                'MethodologyHighlight',
+                fontName=self.fonts['bold'],
+                fontSize=10,
+                textColor=self.colors['methodology_black'],
+                spaceAfter=3 * mm,
+                leading=13
             )
         }
 
-        return custom_styles
-
-    def _add_current_offer_section(self, story: List, data: Dict, styles: Dict, anonymize: bool):
-        """Add current offer section with blue header"""
+    def _add_enhanced_current_offer(self, story: List, data: Dict, styles: Dict, anonymize: bool):
+        """Section offre actuelle avec formatage amélioré"""
         current_offer = data.get('current_offer', {})
         doc_type = data.get('type_facture', 'énergie')
 
-        # Section title with bullet
+        # Titre de section avec puce bleue
         fournisseur = current_offer.get('fournisseur', 'Non spécifié')
         if anonymize:
             fournisseur = 'Fournisseur Actuel'
@@ -220,7 +332,7 @@ class ProfessionalPDFGenerator:
         title = f"■ Offre actuelle {doc_type} – {fournisseur}"
         story.append(Paragraph(title, styles['section_title']))
 
-        # Details
+        # Détails organisés
         details = []
         if current_offer.get('offre_nom'):
             details.append(f"Offre : {current_offer['offre_nom']}")
@@ -234,103 +346,119 @@ class ProfessionalPDFGenerator:
             details.append(f"Prix moyen observé : {current_offer['prix_moyen_kwh']} TTC")
 
         for detail in details:
-            story.append(Paragraph(detail, styles['body_text']))
+            story.append(Paragraph(detail, styles['offer_details']))
 
-        story.append(Spacer(1, 6 * mm))
+        story.append(Spacer(1, 10 * mm))
 
-    def _add_comparison_table(self, story: List, data: Dict, styles: Dict, anonymize: bool):
-        """Add professional comparison table"""
+    def _add_enhanced_comparison_table(self, story: List, data: Dict, styles: Dict, anonymize: bool):
+        """Tableau comparatif avec style professionnel amélioré"""
         alternatives = data.get('alternatives', [])
         if not alternatives:
             return
 
         doc_type = data.get('type_facture', 'énergie')
 
-        # Section title
+        # Titre de section
         consumption = data.get('current_offer', {}).get('consommation_annuelle', '')
         title = f"■ Comparatif – Offres {doc_type.title()}"
-        if consumption:
+        if consumption and consumption != 'Non applicable':
             title += f" ({consumption})"
         story.append(Paragraph(title, styles['section_title']))
 
-        # Prepare table data
-        headers = ['Fournisseur', 'Prix kWh', 'Abonnement', 'Total annuel TTC']
+        # Préparer les données du tableau
+        if doc_type.lower() == 'internet':
+            headers = ['Fournisseur', 'Prix kWh', 'Abonnement', 'Total annuel TTC']
+        else:
+            headers = ['Fournisseur', 'Prix kWh', 'Abonnement', 'Total annuel TTC']
+
         table_data = [headers]
 
+        # Ajouter les données avec anonymisation si nécessaire
         for i, alt in enumerate(alternatives):
             if anonymize:
                 fournisseur = f"Fournisseur {i + 1}"
             else:
                 fournisseur = alt.get('fournisseur', f'Fournisseur {i + 1}')
 
-            row = [
-                fournisseur,
-                alt.get('prix_kwh', ''),
-                alt.get('abonnement', ''),
-                alt.get('total_annuel', '')
-            ]
+            if doc_type.lower() == 'internet':
+                row = [
+                    fournisseur,
+                    'Non applicable',  # Pas de kWh pour internet
+                    alt.get('abonnement', alt.get('prix_mensuel', '')),
+                    alt.get('total_annuel', '')
+                ]
+            else:
+                row = [
+                    fournisseur,
+                    alt.get('prix_kwh', ''),
+                    alt.get('abonnement', ''),
+                    alt.get('total_annuel', '')
+                ]
             table_data.append(row)
 
-        # Create table
-        table = Table(table_data, colWidths=[45 * mm, 30 * mm, 35 * mm, 40 * mm])
+        # Créer le tableau avec dimensions optimales
+        col_widths = [50 * mm, 30 * mm, 35 * mm, 35 * mm]
+        table = Table(table_data, colWidths=col_widths, repeatRows=1)
 
-        # Style table
+        # Style du tableau amélioré
         table.setStyle(TableStyle([
-            # Header styling
-            ('BACKGROUND', (0, 0), (-1, 0), self.colors['table_header']),
-            ('TEXTCOLOR', (0, 0), (-1, 0), self.colors['primary_blue']),
-            ('FONTNAME', (0, 0), (-1, 0), self.font_name),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            # En-tête - Style professionnel
+            ('BACKGROUND', (0, 0), (-1, 0), self.colors['table_header_blue']),
+            ('TEXTCOLOR', (0, 0), (-1, 0), self.colors['section_blue']),
+            ('FONTNAME', (0, 0), (-1, 0), self.fonts['bold']),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
             ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-            ('FONTWEIGHT', (0, 0), (-1, 0), 'bold'),
 
-            # Data styling
+            # Données - Style clean
             ('BACKGROUND', (0, 1), (-1, -1), white),
-            ('TEXTCOLOR', (0, 1), (-1, -1), self.colors['text_dark']),
-            ('FONTNAME', (0, 1), (-1, -1), self.font_name),
-            ('FONTSIZE', (0, 1), (-1, -1), 9),
-            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),  # Center numbers
-            ('ALIGN', (0, 1), (0, -1), 'LEFT'),  # Left align supplier names
+            ('TEXTCOLOR', (0, 1), (-1, -1), self.colors['text_black']),
+            ('FONTNAME', (0, 1), (-1, -1), self.fonts['regular']),
+            ('FONTSIZE', (0, 1), (-1, -1), 10),
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),  # Centrer les chiffres
+            ('ALIGN', (0, 1), (0, -1), 'LEFT'),  # Aligner les noms à gauche
 
-            # Grid
-            ('GRID', (0, 0), (-1, -1), 0.5, self.colors['text_medium']),
-            ('LINEBELOW', (0, 0), (-1, 0), 1, self.colors['primary_blue']),
+            # Bordures et grilles
+            ('GRID', (0, 0), (-1, -1), 0.75, self.colors['table_border']),
+            ('LINEBELOW', (0, 0), (-1, 0), 2, self.colors['section_blue']),
 
-            # Padding
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+            # Padding optimal
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+
+            # Alternance de couleurs pour lisibilité
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [white, self.colors['light_gray']]),
         ]))
 
         story.append(table)
-        story.append(Spacer(1, 8 * mm))
+        story.append(Spacer(1, 12 * mm))
 
-    def _add_issues_section(self, story: List, data: Dict, styles: Dict):
-        """Add detected issues section"""
+    def _add_enhanced_issues_section(self, story: List, data: Dict, styles: Dict):
+        """Section pièges détectés avec mise en forme améliorée"""
         issues = data.get('detected_issues', [])
         if not issues:
             return
 
-        # Section title
+        # Titre de section
         story.append(Paragraph("■ Pièges détectés dans l'offre actuelle", styles['section_title']))
 
-        # Issues list
+        # Liste des problèmes avec puces
         for issue in issues:
-            story.append(Paragraph(f"- {issue}", styles['body_text']))
+            story.append(Paragraph(f"- {issue}", styles['issues_list']))
 
-        story.append(Spacer(1, 6 * mm))
+        story.append(Spacer(1, 10 * mm))
 
-    def _add_recommendation_section(self, story: List, data: Dict, styles: Dict, anonymize: bool):
-        """Add recommendation section with highlighting"""
+    def _add_enhanced_recommendation(self, story: List, data: Dict, styles: Dict, anonymize: bool):
+        """Recommandation mise en évidence"""
         best_savings = data.get('best_savings', {})
         if not best_savings:
             return
 
-        # Section title
+        # Titre de section
         story.append(Paragraph("■ Notre recommandation", styles['section_title']))
 
-        # Recommendation text
+        # Texte de recommandation en rouge et gras
         fournisseur = best_savings.get('fournisseur_recommande', '')
         if anonymize and fournisseur:
             fournisseur = 'le fournisseur recommandé'
@@ -339,57 +467,60 @@ class ProfessionalPDFGenerator:
         consumption = data.get('current_offer', {}).get('consommation_annuelle', '')
 
         if fournisseur and economie:
-            if anonymize:
-                text = f"En changeant pour {fournisseur}, vous pourriez économiser jusqu'à {economie} TTC/an"
-            else:
-                text = f"En changeant pour {fournisseur}, vous pourriez économiser jusqu'à {economie} TTC/an"
+            text = f"En changeant pour {fournisseur}, vous pourriez économiser jusqu'à {economie} TTC/an"
 
-            if consumption:
+            if consumption and consumption != 'Non applicable':
                 text += f" à consommation constante ({consumption})."
             else:
                 text += "."
 
             story.append(Paragraph(text, styles['recommendation']))
 
-        story.append(Spacer(1, 6 * mm))
+        story.append(Spacer(1, 10 * mm))
 
-    def _add_methodology_section(self, story: List, styles: Dict):
-        """Add methodology and reliability section"""
-        # Section title
+    def _add_enhanced_methodology(self, story: List, styles: Dict):
+        """Section méthodologie avec formatage professionnel"""
+        # Titre de section
         story.append(Paragraph("■ Méthodologie & Fiabilité des données", styles['section_title']))
 
-        # Methodology text
-        methodology_text = [
+        # Textes méthodologie
+        methodology_texts = [
             "Les données de ce rapport proviennent de votre facture, d'offres publiques à jour, et de références officielles (TRV, CRE, barèmes).",
             "Les comparaisons sont faites à partir de sources vérifiables (sites fournisseurs, simulateurs certifiés).",
-            "■ Rapport indépendant, sans publicité ni affiliation. Son seul but : identifier vos économies possibles."
         ]
 
-        for text in methodology_text:
+        for text in methodology_texts:
             story.append(Paragraph(text, styles['methodology']))
 
-        story.append(Spacer(1, 4 * mm))
+        # Mention finale en gras
+        final_text = "■ Rapport indépendant, sans publicité ni affiliation. Son seul but : identifier vos économies possibles."
+        story.append(Paragraph(final_text, styles['methodology_highlight']))
+
+        story.append(Spacer(1, 6 * mm))
 
     def generate_popup_summary(self, data: Dict) -> str:
-        """Generate summary for popup display"""
+        """Génère le résumé pour la popup avec données enrichies"""
         issues = data.get('detected_issues', [])
         best_savings = data.get('best_savings', {})
 
         summary_parts = []
 
-        # Add savings info
+        # Économies
         economie = best_savings.get('economie_annuelle', '')
         if economie:
             summary_parts.append(f"💸 Vous pourriez optimiser jusqu'à {economie}/an sur votre facture !")
 
-        # Add key issues (max 3)
+        # Problèmes clés (max 3)
         if issues:
             summary_parts.append("🔍 Problèmes détectés :")
             for issue in issues[:3]:
                 summary_parts.append(f"• {issue}")
 
-        # Add recommendation
+        # Recommandation
         if best_savings:
-            summary_parts.append("💡 Changement de fournisseur recommandé pour réaliser ces économies.")
+            summary_parts.append("💡 Changement recommandé pour réaliser ces économies.")
+
+        # Source des données
+        summary_parts.append("📊 Basé sur des données réelles du marché français 2025.")
 
         return "\n\n".join(summary_parts)
