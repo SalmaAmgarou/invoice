@@ -1,0 +1,351 @@
+{
+  "metadata": {
+    "date_extraction": "2025-08-19T14:30:00Z",
+    "perimetre": {
+      "services": ["electricite", "gaz", "eau"],
+      "zone": "France métropolitaine",
+      "cible": "Particuliers",
+      "periode": "Août 2025"
+    },
+    "methodologie": {
+      "bases_calcul": {
+        "consommation_electricite": "6000 kWh/an",
+        "consommation_gaz": "10000 kWh/an",
+        "consommation_eau": "120 m³/an",
+        "puissance_souscrite": "6 kVA",
+        "option_tarifaire": "Base (électricité)"
+      },
+      "sources": [
+        "Sites officiels fournisseurs",
+        "Comparateurs: selectra.info, hellowatt.fr, lesfurets.com",
+        "CRE (Commission de Régulation de l'Énergie)",
+        "SISPEA (observatoire eau)"
+      ]
+    },
+    "references_officielles": {
+      "trv_electricite": {
+        "fournisseur": "EDF",
+        "nom_offre": "Tarif Bleu (TRV)",
+        "prix_kwh_ttc": 0.1952,
+        "abonnement_annuel_ttc": 185.64,
+        "budget_annuel_6000kwh": 1356.84,
+        "derniere_evolution": "2025-08-01"
+      },
+      "prvg_gaz": {
+        "reference": "Prix Repère Vente Gaz (CRE)",
+        "prix_kwh_chauffage_ttc": 0.1080,
+        "abonnement_annuel_ttc": 330.80,
+        "budget_annuel_10000kwh": 1410.80,
+        "statut": "Prix indicatif mensuel (TRVG supprimé 30/06/2023)"
+      }
+    }
+  },
+
+  "offres_electricite": [
+    {
+      "fournisseur": "OHM Énergie",
+      "nom_offre": "Extra Eco",
+      "type_service": "electricite",
+      "prix_kwh_ttc": 0.1664,
+      "abonnement_annuel_ttc": 201.60,
+      "budget_annuel_6000kwh": 1200.00,
+      "economie_vs_trv": -156.84,
+      "economie_vs_trv_pct": -11.6,
+      "type_prix": "variables",
+      "duree_engagement": "sans engagement",
+      "energie_verte_pct": 0,
+      "option_verte": "+2€/mois disponible",
+      "caracteristiques": ["Prix garantis ≤ TRV 1ère année", "Assistant énergétique Ohmy"],
+      "classement_comparateurs": "N°1 Selectra"
+    },
+    {
+      "fournisseur": "Mint Énergie",
+      "nom_offre": "Online & Green",
+      "type_service": "electricite",
+      "prix_kwh_ttc": 0.1777,
+      "abonnement_annuel_ttc": 185.64,
+      "budget_annuel_6000kwh": 1252.00,
+      "economie_vs_trv": -104.84,
+      "economie_vs_trv_pct": -7.7,
+      "type_prix": "indexé",
+      "duree_engagement": "sans engagement",
+      "energie_verte_pct": 25,
+      "caracteristiques": ["100% digital", "1 arbre planté/souscription", "Garanties d'origine françaises"],
+      "classement_comparateurs": "Top 3 HelloWatt"
+    },
+    {
+      "fournisseur": "EDF",
+      "nom_offre": "Zen Online",
+      "type_service": "electricite",
+      "prix_kwh_ttc": 0.1856,
+      "abonnement_annuel_ttc": 185.64,
+      "budget_annuel_6000kwh": 1299.00,
+      "economie_vs_trv": -57.84,
+      "economie_vs_trv_pct": -4.3,
+      "type_prix": "indexé",
+      "duree_engagement": "sans engagement",
+      "energie_verte_pct": 0,
+      "caracteristiques": ["100% en ligne", "Remise -6% vs TRV garantie"],
+      "classement_comparateurs": "Référence fournisseur historique"
+    },
+    {
+      "fournisseur": "Octopus Energy",
+      "nom_offre": "Eco-conso Fixe",
+      "type_service": "electricite",
+      "prix_kwh_ttc": 0.1856,
+      "abonnement_annuel_ttc": 185.64,
+      "budget_annuel_6000kwh": 1299.00,
+      "economie_vs_trv": -57.84,
+      "economie_vs_trv_pct": -4.3,
+      "type_prix": "fixe_2ans",
+      "duree_engagement": "sans engagement",
+      "energie_verte_pct": 100,
+      "label_vert": "VertVolt Engagé ADEME",
+      "caracteristiques": ["Cagnotte économies d'énergie", "Technologie Kraken", "Service client 4.8/5"],
+      "classement_comparateurs": "SelectraScore A"
+    },
+    {
+      "fournisseur": "Alpiq",
+      "nom_offre": "Électricité Stable",
+      "type_service": "electricite",
+      "prix_kwh_ttc": 0.1810,
+      "abonnement_annuel_ttc": 185.64,
+      "budget_annuel_6000kwh": 1271.00,
+      "economie_vs_trv": -85.84,
+      "economie_vs_trv_pct": -6.3,
+      "type_prix": "fixe",
+      "duree_engagement": "jusqu'au 30/06/2026",
+      "energie_verte_pct": 0,
+      "option_verte": "+0.006€/kWh",
+      "caracteristiques": ["Électricité seule uniquement", "Prix fixe longue durée"],
+      "classement_comparateurs": "Service client reconnu"
+    },
+    {
+      "fournisseur": "Alterna",
+      "nom_offre": "Électricité verte 100% française",
+      "type_service": "electricite",
+      "prix_kwh_ttc": 0.1881,
+      "abonnement_annuel_ttc": 185.64,
+      "budget_annuel_6000kwh": 1294.00,
+      "economie_vs_trv": -62.84,
+      "economie_vs_trv_pct": -4.6,
+      "type_prix": "fixe_1an",
+      "duree_engagement": "sans engagement",
+      "energie_verte_pct": 100,
+      "label_vert": "VertVolt",
+      "caracteristiques": ["51 entreprises locales de distribution", "Électricité française labelisée"],
+      "classement_comparateurs": "Engagement local"
+    }
+  ],
+
+  "offres_gaz": [
+    {
+      "fournisseur": "EDF",
+      "nom_offre": "Avantage Gaz 2 ans",
+      "type_service": "gaz",
+      "prix_kwh_ttc": 0.1028,
+      "abonnement_annuel_ttc": 330.80,
+      "budget_annuel_10000kwh": 1358.80,
+      "economie_vs_prvg": -52.00,
+      "economie_vs_prvg_pct": -3.7,
+      "type_prix": "fixe_2ans",
+      "duree_engagement": "sans engagement",
+      "energie_verte_pct": 0,
+      "option_biogaz": "Non disponible",
+      "caracteristiques": ["Fournisseur historique électricité", "Prix fixes 2 ans"],
+      "classement_comparateurs": "Leader tarifs gaz"
+    },
+    {
+      "fournisseur": "Octopus Energy",
+      "nom_offre": "Eco-conso Gaz",
+      "type_service": "gaz",
+      "prix_kwh_ttc": 0.1007,
+      "abonnement_annuel_ttc": 330.80,
+      "budget_annuel_10000kwh": 1338.00,
+      "economie_vs_prvg": -72.80,
+      "economie_vs_prvg_pct": -5.2,
+      "type_prix": "fixe_2ans",
+      "duree_engagement": "sans engagement",
+      "energie_verte_pct": 0,
+      "option_biogaz": "À venir",
+      "caracteristiques": ["Cagnotte économies", "Technologie Kraken", "Prix fixes 2 ans"],
+      "classement_comparateurs": "SelectraScore A"
+    },
+    {
+      "fournisseur": "ekWateur",
+      "nom_offre": "Gaz Naturel 100% Biogaz",
+      "type_service": "gaz",
+      "prix_kwh_ttc": 0.1140,
+      "abonnement_annuel_ttc": 330.80,
+      "budget_annuel_10000kwh": 1470.80,
+      "economie_vs_prvg": 60.00,
+      "economie_vs_prvg_pct": 4.3,
+      "type_prix": "variables",
+      "duree_engagement": "sans engagement",
+      "energie_verte_pct": 100,
+      "type_biogaz": "100% biométhane français",
+      "caracteristiques": ["Premier fournisseur énergie renouvelable", "100% biométhane"],
+      "classement_comparateurs": "Leader énergie verte"
+    },
+    {
+      "fournisseur": "Alterna",
+      "nom_offre": "Biogaz Zen 1 an",
+      "type_service": "gaz",
+      "prix_kwh_ttc": 0.1240,
+      "abonnement_annuel_ttc": 330.80,
+      "budget_annuel_10000kwh": 1570.80,
+      "economie_vs_prvg": 160.00,
+      "economie_vs_prvg_pct": 11.3,
+      "type_prix": "fixe_1an",
+      "duree_engagement": "sans engagement",
+      "energie_verte_pct": 100,
+      "type_biogaz": "100% biométhane français",
+      "caracteristiques": ["51 ELD partenaires", "Biométhane français garanti"],
+      "classement_comparateurs": "Premium biogaz"
+    }
+  ],
+
+  "offres_duales": [
+    {
+      "fournisseur": "Octopus Energy",
+      "nom_offre": "Eco-conso Électricité + Gaz",
+      "type_service": "duale",
+      "prix_kwh_electricite_ttc": 0.1856,
+      "prix_kwh_gaz_ttc": 0.1007,
+      "abonnement_electricite_ttc": 185.64,
+      "abonnement_gaz_ttc": 330.80,
+      "budget_annuel_dual": 2637.00,
+      "economie_vs_references": -130.64,
+      "economie_vs_references_pct": -4.7,
+      "type_prix": "fixe_2ans",
+      "duree_engagement": "sans engagement",
+      "energie_verte_electricite_pct": 100,
+      "energie_verte_gaz_pct": 0,
+      "caracteristiques": ["Cagnotte économies commune", "Gestion unifiée", "Label VertVolt électricité"],
+      "classement_comparateurs": "N°1 offres duales"
+    },
+    {
+      "fournisseur": "Vattenfall",
+      "nom_offre": "Équilibre Verte + Gaz Essentielle",
+      "type_service": "duale",
+      "prix_kwh_electricite_ttc": 0.1872,
+      "prix_kwh_gaz_ttc": 0.1028,
+      "abonnement_electricite_ttc": 199.00,
+      "abonnement_gaz_ttc": 315.00,
+      "budget_annuel_dual": 2665.00,
+      "economie_vs_references": -102.64,
+      "economie_vs_references_pct": -3.7,
+      "type_prix": "indexé",
+      "duree_engagement": "sans engagement",
+      "energie_verte_electricite_pct": 100,
+      "energie_verte_gaz_pct": 0,
+      "caracteristiques": ["Fournisseur suédois public", "Garanties d'origine électricité"],
+      "classement_comparateurs": "Top 5 duales"
+    },
+    {
+      "fournisseur": "Eni (Plenitude)",
+      "nom_offre": "Plenifix 1 an Électricité + Gaz",
+      "type_service": "duale",
+      "prix_kwh_electricite_ttc": 0.1774,
+      "prix_kwh_gaz_ttc": 0.1330,
+      "abonnement_electricite_ttc": 185.64,
+      "abonnement_gaz_ttc": 330.80,
+      "budget_annuel_dual": 2828.00,
+      "economie_vs_references": 60.36,
+      "economie_vs_references_pct": 2.2,
+      "type_prix": "fixe_1an",
+      "duree_engagement": "sans engagement",
+      "energie_verte_electricite_pct": 100,
+      "energie_verte_gaz_pct": 0,
+      "caracteristiques": ["3ème fournisseur gaz France", "Électricité verte française"],
+      "classement_comparateurs": "Fournisseur italien etabli"
+    }
+  ],
+
+  "distributeurs_eau": [
+    {
+      "distributeur": "Eau de Paris",
+      "type": "regie_municipale",
+      "zone_desserte": "Paris intra-muros",
+      "prix_m3_ttc": 3.83,
+      "abonnement_annuel_ttc": "Non précisé",
+      "budget_annuel_120m3": 459.60,
+      "services_inclus": ["Eau potable", "Réseau eau non potable"],
+      "caracteristiques": ["Eau la moins chère de France", "Double réseau (potable/non potable)"],
+      "classement_national": "N°1 prix le plus bas"
+    },
+    {
+      "distributeur": "Eau du Grand Lyon",
+      "type": "regie_publique",
+      "zone_desserte": "Métropole de Lyon (69)",
+      "prix_m3_ttc": 3.69,
+      "abonnement_annuel_ttc": 49.77,
+      "budget_annuel_120m3": 492.00,
+      "services_inclus": ["Eau potable", "Assainissement", "Redevances"],
+      "caracteristiques": ["Tarification progressive et solidaire", "12 premiers m³ gratuits"],
+      "innovation_sociale": "Gratuité partielle"
+    },
+    {
+      "distributeur": "Veolia Eau",
+      "type": "delegation_privee",
+      "zone_desserte": "Nantes Métropole (44)",
+      "prix_m3_ttc": 3.58,
+      "abonnement_annuel_ttc": 55.20,
+      "budget_annuel_120m3": 485.00,
+      "services_inclus": ["Eau potable", "Assainissement collectif", "Redevances"],
+      "caracteristiques": ["Tarification stable", "Territoire dense"],
+      "classement_national": "Compétitif métropole"
+    },
+    {
+      "distributeur": "Eaux de Marseille",
+      "type": "regie_publique",
+      "zone_desserte": "Marseille et métropole",
+      "prix_m3_ttc": 4.42,
+      "abonnement_annuel_ttc": "Non précisé",
+      "budget_annuel_120m3": 530.40,
+      "services_inclus": ["Eau potable", "Assainissement", "Redevances"],
+      "caracteristiques": ["Coûts élevés approvisionnement (Durance, Verdon)"],
+      "contraintes_locales": "Ressources éloignées"
+    },
+    {
+      "distributeur": "Moyenne nationale",
+      "type": "reference_sispea",
+      "zone_desserte": "France métropolitaine",
+      "prix_m3_ttc": 4.69,
+      "budget_annuel_120m3": 562.80,
+      "services_inclus": ["Eau potable 2,32€", "Assainissement 2,37€"],
+      "ecart_gestion": {
+        "regie_publique": 4.54,
+        "delegation_privee": 4.88,
+        "difference": 0.34
+      },
+      "variations_regionales": {
+        "moins_cher": "Rhône-Alpes (3,11€)",
+        "plus_cher": "Centre-Val-de-Loire (5,44€)"
+      }
+    }
+  ],
+
+  "analyse_marche": {
+    "tendances_2025": {
+      "consolidation": "Nombreux rachats (Plüm→Octopus, Planète OUI→Mint)",
+      "digitalisation": "Applications mobiles et services connectés généralisés",
+      "engagement_vert": "Labels VertVolt, biométhane, électricité locale en progression",
+      "prix_fixes": "Préférés face à volatilité des marchés énergétiques",
+      "services_additionnels": "Cagnottes, conseils énergie, domotique"
+    },
+    "economies_potentielles": {
+      "electricite_max": 156.84,
+      "gaz_max": 72.80,
+      "dual_max": 130.64,
+      "pourcentage_foyers": "85% peuvent économiser vs tarifs référence"
+    },
+    "competition": {
+      "fournisseurs_actifs": 40,
+      "offres_recensees": 180,
+      "leaders_prix": ["OHM Énergie", "Mint Énergie", "Octopus Energy"],
+      "leaders_service": ["Octopus Energy", "TotalEnergies", "Engie"],
+      "leaders_vert": ["ekWateur", "ilek", "Alterna"]
+    }
+  }
+}
