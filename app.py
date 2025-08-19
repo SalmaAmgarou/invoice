@@ -15,9 +15,9 @@ from config import Config
 from database import get_db, create_tables, User, Invoice
 from ocr_processor import OCRProcessor
 from ai_analyzer import EnhancedInvoiceAnalyzer
-from pdf_generator import EnhancedPDFGenerator
+from pdf_generator import FixedPDFGenerator
 
-# Setup logging avec plus de détails
+# Setup logging détaillé
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -26,25 +26,25 @@ logger = logging.getLogger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
-    title="Analyseur de Factures Professionnel API",
-    description="API avancée pour l'analyse automatisée de factures avec IA et données réelles du marché",
-    version="2.0.0"
+    title="Analyseur de Factures API - Version Corrigée",
+    description="API corrigée pour l'analyse de factures avec formatage PDF professionnel",
+    version="2.1.0"
 )
 
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure properly for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize enhanced components
+# Initialize corrected components
 Config.create_folders()
 ocr_processor = OCRProcessor()
 ai_analyzer = EnhancedInvoiceAnalyzer()
-pdf_generator = EnhancedPDFGenerator()
+pdf_generator = FixedPDFGenerator()
 
 
 # Pydantic models
@@ -64,15 +64,14 @@ class UserResponse(BaseModel):
     phone: str
 
 
-class EnhancedAnalysisResult(BaseModel):
+class FixedAnalysisResult(BaseModel):
     success: bool
     message: str
     ai_result: str
     pdf_url: Optional[str] = None
     savings: Optional[float] = None
-    analysis_quality: Optional[str] = None
-    performance_score: Optional[dict] = None
-    market_insights: Optional[dict] = None
+    invoice_type: Optional[str] = None
+    quality_score: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):
@@ -83,21 +82,19 @@ class ErrorResponse(BaseModel):
 # Events
 @app.on_event("startup")
 async def startup_event():
-    """Create database tables and initialize components"""
+    """Initialize application with corrected components"""
     create_tables()
 
-    # Test des composants
     try:
-        # Test connexion IA
-        logger.info("Test connexion OpenAI...")
+        # Test components
+        logger.info("🔧 Initialisation des composants corrigés...")
+
+        # Test AI connection
         test_result = ai_analyzer.client.models.list()
         logger.info("✅ OpenAI connecté")
 
-        # Test générateur PDF
-        logger.info("Test générateur PDF...")
-        logger.info("✅ Générateur PDF initialisé")
-
-        logger.info("🚀 Application démarrée avec composants améliorés")
+        logger.info("✅ Générateur PDF corrigé initialisé")
+        logger.info("🚀 Application démarrée avec corrections complètes")
 
     except Exception as e:
         logger.error(f"⚠️ Erreur initialisation: {e}")
@@ -115,33 +112,26 @@ def allowed_file(filename: str) -> bool:
         filename.rsplit('.', 1)[1].lower() in Config.ALLOWED_EXTENSIONS
 
 
-def get_user_ip(request) -> str:
-    """Get user IP address"""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0]
-    return request.client.host
-
-
 # Routes
 @app.get("/")
 async def root():
     return {
-        "message": "Analyseur de Factures Professionnel API",
-        "version": "2.0.0",
-        "features": [
-            "OCR avancé PDF et images",
-            "Analyse IA avec données réelles du marché",
-            "Rapports PDF professionnels",
-            "Données temps réel des fournisseurs français",
-            "Calculs d'économies précis"
+        "message": "Analyseur de Factures API - Version Corrigée",
+        "version": "2.1.0",
+        "corrections": [
+            "✅ Espacement PDF corrigé",
+            "✅ Tableaux sans débordement",
+            "✅ Polices plus grasses",
+            "✅ Détection type de facture",
+            "✅ Génération cohérente",
+            "✅ Puces simples (■)"
         ]
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check détaillé"""
+    """Health check détaillé avec status des corrections"""
     try:
         # Test IA
         ai_status = "OK"
@@ -162,14 +152,23 @@ async def health_check():
 
         return {
             "status": "healthy",
-            "message": "API fonctionne correctement",
+            "message": "API avec corrections complètes",
             "components": {
                 "openai": ai_status,
                 "database": db_status,
                 "ocr": "OK",
-                "pdf_generator": "OK"
+                "pdf_generator": "CORRIGÉ ✅",
+                "ai_analyzer": "CORRIGÉ ✅"
             },
-            "version": "2.0.0"
+            "corrections_applied": [
+                "Espacement PDF optimisé",
+                "Tableaux avec largeurs fixes",
+                "Polices grasses améliorées",
+                "Détection intelligente type facture",
+                "Génération cohérente sans 'Non calculable'",
+                "Puces simples sans duplication"
+            ],
+            "version": "2.1.0"
         }
     except Exception as e:
         return {
@@ -226,8 +225,8 @@ async def create_user(
         raise HTTPException(status_code=500, detail="Erreur interne du serveur")
 
 
-@app.post("/api/analyze", response_model=EnhancedAnalysisResult)
-async def analyze_invoice_enhanced(
+@app.post("/api/analyze", response_model=FixedAnalysisResult)
+async def analyze_invoice_fixed(
         first_name: str = Form(...),
         last_name: str = Form(...),
         email: EmailStr = Form(...),
@@ -237,7 +236,7 @@ async def analyze_invoice_enhanced(
         invoice: UploadFile = File(...),
         db: Session = Depends(get_db)
 ):
-    """Analyse améliorée avec données réelles et rapport professionnel"""
+    """Analyse corrigée avec formatage PDF professionnel"""
     try:
         # Validation du fichier
         if not invoice.filename:
@@ -246,11 +245,10 @@ async def analyze_invoice_enhanced(
         if not allowed_file(invoice.filename):
             raise HTTPException(status_code=400, detail="Type de fichier non valide")
 
-        logger.info(f"Début analyse: {invoice.filename}")
+        logger.info(f"🔧 Début analyse corrigée: {invoice.filename}")
 
-        # Créer ou récupérer l'utilisateur
+        # Créer ou récupérer utilisateur
         if not user_id:
-            # Vérifier utilisateurs existants
             existing_user = db.query(User).filter(User.email == email).first()
             if existing_user:
                 raise HTTPException(status_code=400, detail="Cet email est déjà utilisé")
@@ -259,7 +257,6 @@ async def analyze_invoice_enhanced(
             if existing_phone:
                 raise HTTPException(status_code=400, detail="Ce numéro de téléphone est déjà utilisé")
 
-            # Créer nouvel utilisateur
             user = User(
                 first_name=first_name,
                 last_name=last_name,
@@ -272,13 +269,13 @@ async def analyze_invoice_enhanced(
             db.commit()
             db.refresh(user)
             user_id = user.id
-            logger.info(f"Nouvel utilisateur créé: {email}")
+            logger.info(f"✅ Nouvel utilisateur créé: {email}")
         else:
             user = db.query(User).filter(User.id == user_id).first()
             if not user:
                 raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
 
-        # Sauvegarder le fichier temporairement
+        # Sauvegarder fichier temporairement
         file_extension = Path(invoice.filename).suffix.lower()
         unique_filename = f"invoice_{uuid.uuid4().hex}{file_extension}"
         temp_path = os.path.join(tempfile.gettempdir(), unique_filename)
@@ -287,10 +284,10 @@ async def analyze_invoice_enhanced(
             content = await invoice.read()
             buffer.write(content)
 
-        logger.info(f"Fichier sauvé: {temp_path} ({len(content)} bytes)")
+        logger.info(f"📁 Fichier sauvé: {temp_path} ({len(content)} bytes)")
 
         # ÉTAPE 1: Extraction OCR
-        logger.info("🔍 Extraction OCR en cours...")
+        logger.info("🔍 Extraction OCR...")
         extracted_text = ocr_processor.extract_text_from_file(temp_path)
 
         if not ocr_processor.is_text_extracted(extracted_text):
@@ -300,24 +297,30 @@ async def analyze_invoice_enhanced(
             )
 
         clean_text = ocr_processor.preprocess_text(extracted_text)
-        logger.info(f"✅ OCR réussi: {len(clean_text)} caractères extraits")
+        logger.info(f"✅ OCR réussi: {len(clean_text)} caractères")
 
-        # ÉTAPE 2: Analyse IA améliorée
-        logger.info("🤖 Analyse IA avec données réelles...")
+        # ÉTAPE 2: Analyse IA corrigée avec détection de type
+        logger.info("🤖 Analyse IA corrigée avec détection de type...")
         analysis_result = ai_analyzer.analyze_invoice(clean_text)
 
         structured_data = analysis_result['structured_data']
-        logger.info(f"✅ Analyse complétée: {structured_data.get('type_facture', 'type inconnu')}")
+        invoice_type = structured_data.get('type_facture', 'inconnu')
+        invoice_subtype = structured_data.get('invoice_subtype', 'standard')
 
-        # ÉTAPE 3: Calcul des économies
+        logger.info(f"✅ Type détecté: {invoice_type} ({invoice_subtype})")
+
+        # ÉTAPE 3: Calcul des économies adapté
         savings = ai_analyzer.calculate_savings(structured_data)
-        logger.info(f"💰 Économies calculées: {savings}€/an" if savings else "💰 Pas d'économies détectées")
+        if savings:
+            logger.info(f"💰 Économies calculées: {savings}€/an")
+        else:
+            logger.info(f"💰 Économies: À évaluer (type: {invoice_subtype})")
 
-        # ÉTAPE 4: Génération des rapports PDF professionnels
-        logger.info("📄 Génération rapports PDF professionnels...")
+        # ÉTAPE 4: Génération PDF corrigée
+        logger.info("📄 Génération PDF avec corrections...")
         internal_pdf_path, user_pdf_path = pdf_generator.generate_reports(structured_data, user_id)
 
-        # ÉTAPE 5: Sauvegarde en base
+        # ÉTAPE 5: Sauvegarde
         invoice_record = Invoice(
             user_id=user_id,
             file_path=temp_path,
@@ -328,10 +331,10 @@ async def analyze_invoice_enhanced(
         db.add(invoice_record)
         db.commit()
 
-        # ÉTAPE 6: Préparation du résumé
+        # ÉTAPE 6: Résumé pour popup
         popup_summary = pdf_generator.generate_popup_summary(structured_data)
 
-        # Nettoyage du fichier temporaire
+        # Nettoyage
         try:
             os.unlink(temp_path)
             logger.info("🗑️ Fichier temporaire supprimé")
@@ -339,17 +342,19 @@ async def analyze_invoice_enhanced(
             logger.warning(f"Impossible de supprimer {temp_path}: {e}")
 
         # Résultat final
-        logger.info(f"✅ Analyse terminée avec succès pour {email}")
+        logger.info(f"✅ Analyse corrigée terminée pour {email}")
 
-        return EnhancedAnalysisResult(
+        # Évaluation qualité
+        quality_score = "excellent" if len(clean_text) > 500 else "bon" if len(clean_text) > 200 else "moyen"
+
+        return FixedAnalysisResult(
             success=True,
-            message="Analyse professionnelle complétée avec données réelles du marché",
+            message=f"Analyse corrigée complétée - Type: {invoice_type} ({invoice_subtype})",
             ai_result=popup_summary,
             pdf_url=user_pdf_path,
             savings=savings,
-            analysis_quality=structured_data.get('analysis_quality', 'high'),
-            performance_score=structured_data.get('performance_score'),
-            market_insights=structured_data.get('market_analysis')
+            invoice_type=f"{invoice_type}_{invoice_subtype}",
+            quality_score=quality_score
         )
 
     except HTTPException:
@@ -367,25 +372,27 @@ async def analyze_invoice_enhanced(
 
 @app.get("/api/download-report/{filename}")
 async def download_report(filename: str):
-    """Téléchargement de rapport PDF"""
+    """Téléchargement de rapport PDF corrigé"""
     try:
-        # Vérifier dans les dossiers de rapports
+        # Vérifier dans les dossiers
         user_path = os.path.join(Config.REPORTS_FOLDER, filename)
         internal_path = os.path.join(Config.REPORTS_INTERNAL_FOLDER, filename)
 
         if os.path.exists(user_path):
-            logger.info(f"📥 Téléchargement rapport utilisateur: {filename}")
+            logger.info(f"📥 Téléchargement rapport utilisateur corrigé: {filename}")
             return FileResponse(
                 user_path,
                 media_type='application/pdf',
-                filename=filename
+                filename=filename,
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
             )
         elif os.path.exists(internal_path):
             logger.info(f"📥 Téléchargement rapport interne: {filename}")
             return FileResponse(
                 internal_path,
                 media_type='application/pdf',
-                filename=filename
+                filename=filename,
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
             )
         else:
             raise HTTPException(status_code=404, detail="Rapport non trouvé")
@@ -395,46 +402,9 @@ async def download_report(filename: str):
         raise HTTPException(status_code=500, detail="Erreur lors du téléchargement")
 
 
-@app.get("/api/users/{user_id}/invoices")
-async def get_user_invoices(user_id: int, db: Session = Depends(get_db)):
-    """Récupérer les factures d'un utilisateur avec détails"""
-    try:
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
-
-        invoices = db.query(Invoice).filter(Invoice.user_id == user_id).all()
-
-        return {
-            "user": {
-                "id": user.id,
-                "name": f"{user.first_name} {user.last_name}",
-                "email": user.email
-            },
-            "invoices": [
-                {
-                    "id": inv.id,
-                    "uploaded_at": inv.uploaded_at.isoformat(),
-                    "savings": float(inv.savings_12_percent) if inv.savings_12_percent else None,
-                    "report_available": bool(inv.report_path),
-                    "internal_report_available": bool(inv.internal_report_path)
-                }
-                for inv in invoices
-            ],
-            "total_savings": sum(float(inv.savings_12_percent) for inv in invoices if inv.savings_12_percent),
-            "total_analyses": len(invoices)
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Erreur récupération factures {user_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Erreur interne du serveur")
-
-
 @app.post("/api/test-ocr")
 async def test_ocr_enhanced(file: UploadFile = File(...)):
-    """Test OCR avec détails techniques"""
+    """Test OCR avec détails de qualité"""
     try:
         if not allowed_file(file.filename):
             raise HTTPException(status_code=400, detail="Type de fichier non valide")
@@ -448,7 +418,7 @@ async def test_ocr_enhanced(file: UploadFile = File(...)):
             content = await file.read()
             buffer.write(content)
 
-        # Extraction et analyse
+        # Extraction OCR
         extracted_text = ocr_processor.extract_text_from_file(temp_path)
         clean_text = ocr_processor.preprocess_text(extracted_text)
 
@@ -457,13 +427,15 @@ async def test_ocr_enhanced(file: UploadFile = File(...)):
         line_count = len(clean_text.split('\n'))
         char_count = len(clean_text)
 
-        # Détection du type de document
+        # Détection du type
         doc_type = "inconnu"
-        if any(word in clean_text.lower() for word in ['kwh', 'électricité', 'edf', 'engie']):
+        if any(word in clean_text.lower() for word in ['souscription', 'mise en service']):
+            doc_type = "souscription"
+        elif any(word in clean_text.lower() for word in ['kwh', 'électricité', 'edf']):
             doc_type = "électricité"
         elif any(word in clean_text.lower() for word in ['gaz', 'naturel']):
             doc_type = "gaz"
-        elif any(word in clean_text.lower() for word in ['internet', 'fibre', 'orange', 'sfr', 'free']):
+        elif any(word in clean_text.lower() for word in ['internet', 'fibre']):
             doc_type = "internet"
 
         # Nettoyage
@@ -477,9 +449,10 @@ async def test_ocr_enhanced(file: UploadFile = File(...)):
             "word_count": word_count,
             "line_count": line_count,
             "document_type": doc_type,
-            "extracted_text": clean_text[:500] + "..." if len(clean_text) > 500 else clean_text,
-            "text_quality": "excellent" if char_count > 200 and word_count > 30 else "good" if char_count > 50 else "poor",
-            "analysis_ready": ocr_processor.is_text_extracted(extracted_text)
+            "extracted_preview": clean_text[:300] + "..." if len(clean_text) > 300 else clean_text,
+            "text_quality": "excellent" if char_count > 500 else "bon" if char_count > 200 else "moyen",
+            "analysis_ready": ocr_processor.is_text_extracted(extracted_text),
+            "corrections_applied": "✅ OCR optimisé"
         }
 
     except Exception as e:
@@ -487,23 +460,37 @@ async def test_ocr_enhanced(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Erreur OCR: {str(e)}")
 
 
-@app.get("/api/market-data")
-async def get_market_data():
-    """Informations sur les données de marché utilisées"""
+@app.get("/api/corrections-info")
+async def get_corrections_info():
+    """Informations sur les corrections apportées"""
     return {
-        "data_sources": [
-            "Commission de Régulation de l'Énergie (CRE)",
-            "Sites officiels des fournisseurs",
-            "Tarifs réglementés en vigueur",
-            "Comparateurs certifiés"
-        ],
-        "last_update": "2025-01-15",
-        "coverage": {
-            "electricity_providers": 6,
-            "gas_providers": 5,
-            "internet_providers": 5
+        "version": "2.1.0",
+        "corrections_applied": {
+            "pdf_formatting": {
+                "espacement": "✅ Espacement entre sections optimisé (4mm au lieu d'excessif)",
+                "tableaux": "✅ Largeurs de colonnes fixes pour éviter débordements",
+                "polices": "✅ Polices plus grasses (Arial/Helvetica Bold quand disponible)",
+                "puces": "✅ Puces simples (■) sans duplication"
+            },
+            "ai_analysis": {
+                "detection_type": "✅ Détection automatique du type de facture",
+                "souscription": "✅ Gestion spéciale des factures de souscription",
+                "coherence": "✅ Élimination des 'Non calculable' inappropriés",
+                "adaptation": "✅ Prompts adaptés selon le type de document"
+            },
+            "content_quality": {
+                "alternatives": "✅ Maximum 4 fournisseurs pour lisibilité",
+                "issues": "✅ Problèmes limités à 4 points concrets",
+                "text_length": "✅ Limitation longueur texte dans tableaux",
+                "fallback": "✅ Réponses de secours cohérentes"
+            }
         },
-        "accuracy": "Données réelles du marché français"
+        "test_recommendations": [
+            "Tester avec facture de souscription (comme EDF Samuel Rivas)",
+            "Tester avec facture de consommation standard",
+            "Vérifier le formatage PDF (espacement, tableaux)",
+            "Contrôler la cohérence du contenu généré"
+        ]
     }
 
 
