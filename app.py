@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 
 from config import Config
-from database import get_db, create_tables, User, Invoice
+from database import get_db, create_tables, User, Invoice, OffreEnergie
 from ocr_processor import OCRProcessor
 from ai_analyzer import EnhancedInvoiceAnalyzer
 from pdf_generator import FixedPDFGenerator
@@ -301,7 +301,95 @@ async def analyze_invoice_fixed(
 
         # ÉTAPE 2: Analyse IA corrigée avec détection de type
         logger.info("🤖 Analyse IA corrigée avec détection de type...")
-        analysis_result = ai_analyzer.analyze_invoice(clean_text)
+        
+        # D'abord, récupérer les offres DB pour le type détecté
+        logger.info("📊 Récupération des offres depuis la BD...")
+        
+        # Détecter le type via heuristiques rapides
+        def _quick_type_detection(text: str) -> str:
+            text_lower = text.lower()
+            if any(word in text_lower for word in ['kwh', 'électricité', 'edf', 'kva']):
+                return 'electricite'
+            elif any(word in text_lower for word in ['gaz', 'm3', 'mètres cubes', 'grdf']):
+                return 'gaz'
+            elif any(word in text_lower for word in ['internet', 'fibre', 'livebox', 'freebox']):
+                return 'internet_mobile'
+            else:
+                return 'electricite'  # Default fallback
+        
+        quick_type = _quick_type_detection(clean_text)
+        
+        # Récupérer le dernier snapshot d'offres pour le type
+        latest_date = db.query(OffreEnergie.date_extraction) \
+            .filter(OffreEnergie.type_service == quick_type) \
+            .order_by(OffreEnergie.date_extraction.desc()).limit(1).scalar()
+        
+        db_offers = []
+        if latest_date:
+            q = db.query(OffreEnergie).filter(
+                OffreEnergie.type_service == quick_type,
+                OffreEnergie.date_extraction == latest_date
+            )
+            offers = q.all()
+            
+            # Convertir en format compatible avec le LLM
+            db_offers = []
+            for off in offers:
+                prix_unite = float(off.prix_unite_ttc or 0)
+                abo = float(off.abonnement_annuel_ttc or 0)
+                
+                # Calculer le total annuel estimé (consommation par défaut)
+                consommation_defaut = 3500.0 if quick_type == 'electricite' else 10000.0 if quick_type == 'gaz' else 0.0
+                total_annuel = prix_unite * consommation_defaut + abo if prix_unite > 0 else 0.0
+                
+                # Normaliser les données pour le LLM
+                db_offer = {
+                    'fournisseur': off.fournisseur,
+                    'nom_offre': off.nom_offre or '',
+                    'prix_kwh': prix_unite,
+                    'abonnement_annuel': abo,
+                    'total_annuel': round(total_annuel, 2),
+                    'type_prix': off.type_prix or 'fixe',
+                    'duree_engagement': off.duree_engagement or 'sans engagement',
+                    'energie_verte_pct': off.energie_verte_pct or 0,
+                    'caracteristiques': off.caracteristiques or [],
+                    'classement_comparateurs': off.classement_comparateurs or '',
+                    'details': off.details or {}
+                }
+                
+                # Pour l'électricité, créer des variantes BASE et HP/HC
+                if quick_type == 'electricite':
+                    # Version BASE
+                    base_offer = db_offer.copy()
+                    base_offer['type_offre'] = 'base'
+                    base_offer['nom_offre'] = f"{off.nom_offre} - Base"
+                    db_offers.append(base_offer)
+                    
+                    # Version HP/HC (avec prix légèrement différents)
+                    hphc_offer = db_offer.copy()
+                    hphc_offer['type_offre'] = 'hphc'
+                    hphc_offer['nom_offre'] = f"{off.nom_offre} HP/HC"
+                    hphc_offer['prix_kwh'] = round(prix_unite * 1.15, 4)  # +15% pour HP
+                    hphc_offer['details'] = {
+                        'prix_hp': round(prix_unite * 1.15, 4),
+                        'prix_hc': round(prix_unite * 0.85, 4),  # -15% pour HC
+                        'repartition_hp_hc': '70% HP / 30% HC'
+                    }
+                    # Recalculer le total avec prix moyen HP/HC
+                    prix_moyen_hphc = (hphc_offer['details']['prix_hp'] * 0.7 + hphc_offer['details']['prix_hc'] * 0.3)
+                    hphc_offer['total_annuel'] = round(prix_moyen_hphc * consommation_defaut + abo, 2)
+                    db_offers.append(hphc_offer)
+                else:
+                    # Gaz et autres: pas de distinction
+                    db_offer['type_offre'] = 'standard'
+                    db_offers.append(db_offer)
+            
+            logger.info(f"✅ {len(db_offers)} offres récupérées depuis la BD (snapshot: {latest_date})")
+        else:
+            logger.warning("Aucun snapshot d'offres trouvé pour la comparaison.")
+        
+        # Maintenant analyser avec le LLM en incluant les offres DB (RAG-style)
+        analysis_result = ai_analyzer.analyze_invoice(clean_text, db_offers)
 
         structured_data = analysis_result['structured_data']
         invoice_type = structured_data.get('type_facture', 'inconnu')
@@ -309,18 +397,73 @@ async def analyze_invoice_fixed(
 
         logger.info(f"✅ Type détecté: {invoice_type} ({invoice_subtype})")
 
-        # ÉTAPE 3: Calcul des économies adapté
-        savings = ai_analyzer.calculate_savings(structured_data)
+        # ÉTAPE 3: Validation et normalisation des données extraites
+        logger.info("🔍 Validation et normalisation des données...")
+        
+        def _validate_and_normalize(data: dict) -> dict:
+            """Valide et normalise les données extraites"""
+            current_offer = data.get('current_offer', {})
+            
+            # Normaliser les montants
+            if current_offer.get('montant_total_annuel'):
+                try:
+                    montant = float(str(current_offer['montant_total_annuel']).replace(',', '.').replace('€', '').strip())
+                    current_offer['montant_total_annuel'] = round(montant, 2)
+                except:
+                    current_offer['montant_total_annuel'] = 0
+            
+            # Normaliser la consommation
+            if current_offer.get('consommation_annuelle'):
+                try:
+                    cons = float(str(current_offer['consommation_annuelle']).replace(',', '.').replace('kWh', '').strip())
+                    current_offer['consommation_annuelle'] = round(cons, 0)
+                except:
+                    current_offer['consommation_annuelle'] = 0
+            
+            # Normaliser le prix kWh
+            if current_offer.get('prix_kwh'):
+                try:
+                    prix = float(str(current_offer['prix_kwh']).replace(',', '.').replace('€', '').strip())
+                    current_offer['prix_kwh'] = round(prix, 4)
+                except:
+                    current_offer['prix_kwh'] = 0
+            
+            # Calculer le prix moyen si possible
+            if current_offer.get('montant_total_annuel') and current_offer.get('consommation_annuelle'):
+                montant = current_offer['montant_total_annuel']
+                cons = current_offer['consommation_annuelle']
+                if cons > 0:
+                    prix_moyen = montant / cons
+                    current_offer['prix_moyen_ttc'] = round(prix_moyen, 4)
+            
+            return data
+        
+        structured_data = _validate_and_normalize(structured_data)
+        
+        # Ajouter les métadonnées des offres
+        if latest_date:
+            structured_data['_offers_snapshot_date'] = str(latest_date)
+            structured_data['_offers_version_source'] = 'donnees_energie.json import'
+        
+        # ÉTAPE 4: Calcul des économies (maintenant géré par le LLM avec les offres DB)
+        savings = None
+        best_savings = structured_data.get('best_savings', {})
+        if best_savings.get('economie_annuelle'):
+            try:
+                savings = float(str(best_savings['economie_annuelle']).replace('€', '').strip())
+            except:
+                savings = None
+        
         if savings:
             logger.info(f"💰 Économies calculées: {savings}€/an")
         else:
             logger.info(f"💰 Économies: À évaluer (type: {invoice_subtype})")
 
-        # ÉTAPE 4: Génération PDF corrigée
+        # ÉTAPE 5: Génération PDF corrigée
         logger.info("📄 Génération PDF avec corrections...")
         internal_pdf_path, user_pdf_path = pdf_generator.generate_reports(structured_data, user_id)
 
-        # ÉTAPE 5: Sauvegarde
+        # ÉTAPE 6: Sauvegarde
         invoice_record = Invoice(
             user_id=user_id,
             file_path=temp_path,

@@ -4,8 +4,6 @@ import logging
 from typing import Dict, Optional, Tuple, List, Any
 from openai import OpenAI
 from config import Config
-from web_search_service import CompetitiveOffersSearchService
-from integration_donnees_reelles import RealDataProvider
 
 logger = logging.getLogger(__name__)
 
@@ -16,8 +14,6 @@ class EnhancedInvoiceAnalyzer:
             raise ValueError("OPENAI_API_KEY n'est pas configuré")
 
         self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
-        self.web_search = CompetitiveOffersSearchService()
-        self.data_provider = RealDataProvider()
 
         # Mapping détaillé des types de factures
         self.invoice_patterns = {
@@ -86,34 +82,28 @@ class EnhancedInvoiceAnalyzer:
         Retourne ces informations dans un format JSON simple. Si une information n'est pas trouvée, indique "non trouvé".
         """
 
-    def analyze_invoice(self, extracted_text: str) -> Dict[str, Any]:
-        """Analyse complète avec détection intelligente et recherche web"""
+    def analyze_invoice(self, extracted_text: str, db_offers: List[Dict] = None) -> Dict[str, Any]:
+        """Analyse complète avec détection intelligente et comparaison via offres DB"""
         try:
             # 1. DÉTECTION AVANCÉE DU TYPE
             invoice_type, confidence = self._advanced_type_detection(extracted_text)
             logger.info(f"🎯 Type détecté: {invoice_type} (confiance: {confidence}%)")
 
-            # 2. EXTRACTION STRUCTURÉE PAR TYPE
-            structured_data = self._extract_structured_data(extracted_text, invoice_type)
+            # 2. EXTRACTION STRUCTURÉE PAR TYPE avec offres DB (RAG-style)
+            structured_data = self._extract_structured_data_with_offers(extracted_text, invoice_type, db_offers)
 
-            # 3. RECHERCHE WEB DES OFFRES CONCURRENTES
-            competitive_offers = self._search_competitive_offers(invoice_type, structured_data)
-
-            # 4. ANALYSE DES PIÈGES ET OPTIMISATIONS
+            # 3. ANALYSE DES PIÈGES ET OPTIMISATIONS
             issues = self._detect_issues(structured_data, invoice_type)
 
-            # 5. CALCUL DES ÉCONOMIES
-            best_savings = self._calculate_best_savings(structured_data, competitive_offers)
-
-            # 6. COMPILATION DU RÉSULTAT FINAL
+            # 4. COMPILATION DU RÉSULTAT FINAL
             result = {
                 'type_facture': invoice_type,
                 'confidence': confidence,
                 'client_info': structured_data.get('client_info', {}),
                 'current_offer': structured_data.get('current_offer', {}),
-                'alternatives': competitive_offers[:5],  # Top 5
+                'alternatives': structured_data.get('alternatives', []),
                 'detected_issues': issues,
-                'best_savings': best_savings,
+                'best_savings': structured_data.get('best_savings', {}),
                 'methodology': self._get_methodology(invoice_type),
                 'structured_data': structured_data
             }
@@ -206,11 +196,16 @@ Réponds UNIQUEMENT avec le type, rien d'autre."""
 
         return 'inconnu', 0
 
-    def _extract_structured_data(self, text: str, invoice_type: str) -> Dict:
-        """Extraction structurée adaptée au type de facture"""
-
-        # Prompt spécialisé selon le type
-        prompt = self._get_specialized_extraction_prompt(invoice_type)
+    def _extract_structured_data_with_offers(self, text: str, invoice_type: str, db_offers: List[Dict] = None) -> Dict:
+        """Extraction structurée avec offres DB pour comparaison (RAG-style)"""
+        
+        # Construire le prompt avec les offres DB si disponibles
+        offers_context = ""
+        if db_offers:
+            offers_context = f"\n\nOffres disponibles pour comparaison:\n{json.dumps(db_offers, ensure_ascii=False, indent=2)}"
+        
+        # Prompt spécialisé selon le type avec schéma JSON strict
+        prompt = self._get_specialized_extraction_prompt_with_schema(invoice_type, offers_context)
 
         try:
             response = self.client.chat.completions.create(
@@ -219,156 +214,188 @@ Réponds UNIQUEMENT avec le type, rien d'autre."""
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": f"Texte de la facture:\n{text}"}
                 ],
-                max_tokens=1500,
-                temperature=0.1
+                max_tokens=2000,
+                temperature=0.0,
+                response_format={"type": "json_object"}
             )
 
-            result = response.choices[0].message.content
-
-            # Parser le JSON
-            json_match = re.search(r'\{.*\}', result, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-
+            content = response.choices[0].message.content
+            try:
+                result = json.loads(content)
+                
+                # Fallback: si pas assez d'alternatives, utiliser toutes les offres DB
+                if db_offers and len(result.get('alternatives', [])) < len(db_offers):
+                    logger.info(f"LLM n'a généré que {len(result.get('alternatives', []))} alternatives, utilisation de toutes les {len(db_offers)} offres DB")
+                    result['alternatives'] = db_offers
+                
+                return result
+            except Exception as e:
+                logger.error(f"Erreur parsing JSON: {e}")
+                # Dernier recours: tenter d'extraire un objet JSON si présent
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group())
+                    # Fallback: utiliser toutes les offres DB
+                    if db_offers:
+                        result['alternatives'] = db_offers
+                    return result
         except Exception as e:
             logger.error(f"Erreur extraction: {e}")
 
+        # Fallback final: utiliser toutes les offres DB
+        if db_offers:
+            logger.info("Utilisation du fallback avec toutes les offres DB")
+            return {
+                'type_facture': invoice_type,
+                'client_info': {'nom': 'À extraire'},
+                'current_offer': {'fournisseur': 'À identifier'},
+                'alternatives': db_offers,
+                'best_savings': {'economie_annuelle': 'À calculer'}
+            }
+
         return self._get_fallback_structure(invoice_type)
 
-    def _get_specialized_extraction_prompt(self, invoice_type: str) -> str:
-        """Retourne le prompt spécialisé selon le type"""
+    def _get_specialized_extraction_prompt_with_schema(self, invoice_type: str, offers_context: str) -> str:
+        """Retourne le prompt spécialisé avec schéma JSON strict selon le type"""
 
-        if invoice_type == 'internet_mobile':
-            return """Tu es expert en factures télécoms françaises. Extrais PRÉCISÉMENT:
+        if invoice_type == 'electricite':
+            return f"""Tu es expert en factures d'électricité françaises. Extrais PRÉCISÉMENT selon ce schéma JSON strict:
 
-{
-  "client_info": {
-    "nom": "Nom complet",
+{{
+  "client_info": {{
+    "nom": "Nom complet du client",
     "adresse": "Adresse complète",
-    "numero_client": "N° client",
+    "numero_pdl": "Point de livraison si présent",
+    "numero_contrat": "N° contrat si présent"
+  }},
+  "current_offer": {{
+    "fournisseur": "Nom exact du fournisseur",
+    "offre_nom": "Nom exact de l'offre",
+    "puissance_souscrite": "Puissance en kVA (ex: 6)",
+    "option_tarifaire": "Base ou HP/HC",
+    "consommation_annuelle": "Consommation annuelle en kWh",
+    "montant_total_annuel": "Montant total annuel TTC en euros",
+    "prix_kwh": "Prix du kWh TTC en euros",
+    "abonnement_annuel": "Abonnement annuel TTC en euros",
+    "details": {{
+      "prix_hp": "Prix kWh heures pleines si HP/HC",
+      "prix_hc": "Prix kWh heures creuses si HP/HC",
+      "repartition_hp_hc": "Répartition HP/HC si applicable"
+    }}
+  }},
+  "consommation": {{
+    "periode": "Période de facturation",
+    "kwh_consommes": "Total kWh consommés",
+    "index_releve": "Index compteur si présent"
+  }},
+  "alternatives": [
+    {{
+      "fournisseur": "Nom du fournisseur",
+      "offre": "Nom de l'offre",
+      "prix_kwh": "Prix kWh TTC",
+      "abonnement_annuel": "Abonnement annuel TTC",
+      "total_annuel": "Total annuel calculé TTC",
+      "type_offre": "base ou hphc"
+    }}
+  ],
+  "best_savings": {{
+    "fournisseur_recommande": "Nom du fournisseur recommandé",
+    "economie_annuelle": "Économie annuelle en euros",
+    "pourcentage_economie": "Pourcentage d'économie"
+  }}
+}}
+
+IMPORTANT: Utilise TOUTES les offres disponibles pour remplir 'alternatives'. Ne limite pas le nombre d'alternatives. Chaque offre doit avoir un 'type_offre' correct ('base' ou 'hphc').{offers_context}"""
+
+        elif invoice_type == 'gaz':
+            return f"""Tu es expert en factures de gaz françaises. Extrais selon ce schéma JSON strict:
+
+{{
+  "client_info": {{
+    "nom": "Nom complet du client",
+    "adresse": "Adresse complète",
+    "numero_pce": "Point comptage et émission si présent",
+    "numero_contrat": "N° contrat si présent"
+  }},
+  "current_offer": {{
+    "fournisseur": "Nom exact du fournisseur",
+    "offre_nom": "Nom exact de l'offre",
+    "classe_consommation": "Classe B0/B1/B2I si présente",
+    "consommation_annuelle": "Consommation annuelle en kWh",
+    "montant_total_annuel": "Montant total annuel TTC en euros",
+    "prix_kwh": "Prix du kWh TTC en euros",
+    "abonnement_annuel": "Abonnement annuel TTC en euros"
+  }},
+  "consommation": {{
+    "periode": "Période de facturation",
+    "kwh_consommes": "Total kWh consommés",
+    "m3_consommes": "Total m³ consommés si présent"
+  }},
+  "alternatives": [
+    {{
+      "fournisseur": "Nom du fournisseur",
+      "offre": "Nom de l'offre",
+      "prix_kwh": "Prix kWh TTC",
+      "abonnement": "Abonnement annuel TTC",
+      "total_annuel": "Total annuel calculé TTC"
+    }}
+  ],
+  "best_savings": {{
+    "fournisseur_recommande": "Nom du fournisseur recommandé",
+    "economie_annuelle": "Économie annuelle en euros",
+    "pourcentage_economie": "Pourcentage d'économie"
+  }}
+}}
+
+Utilise les offres disponibles pour remplir 'alternatives' et calculer 'best_savings'.{offers_context}"""
+
+        elif invoice_type == 'internet_mobile':
+            return f"""Tu es expert en factures télécoms françaises. Extrais selon ce schéma JSON strict:
+
+{{
+  "client_info": {{
+    "nom": "Nom complet du client",
+    "adresse": "Adresse complète",
+    "numero_client": "N° client si présent",
     "reference_pto": "Référence fibre si présente"
-  },
-  "current_offer": {
+  }},
+  "current_offer": {{
     "fournisseur": "Orange|SFR|Free|Bouygues",
-    "offre_nom": "Nom exact de l'offre (ex: Open Max 200 Go)",
+    "offre_nom": "Nom exact de l'offre",
     "prix_mensuel": "Prix mensuel TTC en euros",
     "montant_total_annuel": "Montant annuel calculé",
-    "services_inclus": {
+    "services_inclus": {{
       "internet": "Type et débit",
       "mobile": "Forfait data",
       "tv": "Oui/Non et détails",
       "telephone_fixe": "Oui/Non"
-    },
-    "engagement": "Date fin engagement"
-  },
-  "consommation": {
-    "data_mobile": "Go consommés",
-    "appels": "Durée/nombre",
-    "sms": "Nombre"
-  },
-  "facturation": {
-    "periode": "Période facturée",
-    "montant_ttc": "Montant de cette facture"
-  }
-}"""
+    }},
+    "engagement": "Date fin engagement si présente"
+  }},
+  "consommation": {{
+    "data_mobile": "Go consommés si applicable",
+    "appels": "Durée/nombre si applicable",
+    "sms": "Nombre si applicable"
+  }},
+  "alternatives": [
+    {{
+      "fournisseur": "Nom du fournisseur",
+      "offre": "Nom de l'offre",
+      "prix_mensuel": "Prix mensuel TTC",
+      "total_annuel": "Total annuel calculé TTC",
+      "avantages": "Avantages de l'offre"
+    }}
+  ],
+  "best_savings": {{
+    "fournisseur_recommande": "Nom du fournisseur recommandé",
+    "economie_annuelle": "Économie annuelle en euros"
+  }}
+}}
 
-        elif invoice_type == 'electricite':
-            return """Tu es expert en factures d'électricité françaises. Extrais PRÉCISÉMENT:
-
-{
-  "client_info": {
-    "nom": "Nom complet",
-    "adresse": "Adresse",
-    "numero_pdl": "Point de livraison",
-    "numero_contrat": "N° contrat"
-  },
-  "current_offer": {
-    "fournisseur": "Nom du fournisseur",
-    "offre_nom": "Nom de l'offre",
-    "puissance_souscrite": "kVA",
-    "option_tarifaire": "Base/HP-HC",
-    "consommation_annuelle": "kWh/an",
-    "montant_total_annuel": "€ TTC/an",
-    "prix_kwh": "€/kWh TTC",
-    "abonnement_annuel": "€ TTC/an"
-  },
-  "consommation": {
-    "periode": "Dates",
-    "kwh_consommes": "Total kWh",
-    "index_releve": "Index compteur"
-  }
-}"""
-
-        elif invoice_type == 'gaz':
-            return """Tu es expert en factures de gaz françaises. Extrais:
-
-{
-  "client_info": {
-    "nom": "Nom",
-    "adresse": "Adresse",
-    "numero_pce": "Point comptage",
-    "numero_contrat": "Contrat"
-  },
-  "current_offer": {
-    "fournisseur": "Fournisseur",
-    "offre_nom": "Offre",
-    "classe_consommation": "B0/B1/B2I",
-    "consommation_annuelle": "kWh/an",
-    "montant_total_annuel": "€ TTC/an",
-    "prix_kwh": "€/kWh TTC",
-    "abonnement_annuel": "€ TTC/an"
-  }
-}"""
+Utilise les offres disponibles pour remplir 'alternatives' et calculer 'best_savings'.{offers_context}"""
 
         # Autres types...
         return self._get_generic_extraction_prompt()
-
-    def _search_competitive_offers(self, invoice_type: str, structured_data: Dict) -> List[Dict]:
-        """Recherche les offres concurrentes via web search et données réelles"""
-
-        competitive_offers = []
-
-        # 1. Données réelles du provider
-        if invoice_type == 'electricite':
-            consumption = self._extract_consumption_value(
-                structured_data.get('current_offer', {}).get('consommation_annuelle', '5000')
-            )
-            real_offers = self.data_provider.get_real_electricity_offers(consumption)
-            competitive_offers.extend(real_offers)
-
-        elif invoice_type == 'gaz':
-            consumption = self._extract_consumption_value(
-                structured_data.get('current_offer', {}).get('consommation_annuelle', '10000')
-            )
-            real_offers = self.data_provider.get_real_gas_offers(consumption)
-            competitive_offers.extend(real_offers)
-
-        elif invoice_type in ['internet', 'mobile', 'internet_mobile']:
-            current_price = self._extract_price_value(
-                structured_data.get('current_offer', {}).get('prix_mensuel', '50')
-            )
-            real_offers = self.data_provider.get_real_internet_offers(current_price)
-            competitive_offers.extend(real_offers)
-
-        # 2. Web search pour offres supplémentaires
-        if invoice_type in ['electricite', 'gaz']:
-            search_type = 'energie'
-        elif invoice_type in ['internet', 'mobile', 'internet_mobile']:
-            search_type = 'telecom'
-        else:
-            search_type = invoice_type
-
-        web_offers = self.web_search.search_competitive_offers(
-            search_type,
-            structured_data.get('current_offer', {}),
-            structured_data.get('consommation', {})
-        )
-
-        # 3. Fusion et déduplication
-        all_offers = self._merge_and_deduplicate_offers(competitive_offers + web_offers)
-
-        # 4. Classement par économies potentielles
-        return self._rank_offers_by_savings(all_offers, structured_data)
 
     def _detect_issues(self, structured_data: Dict, invoice_type: str) -> List[str]:
         """Détecte les pièges et problèmes selon les instructions utilisateur"""
@@ -382,7 +409,7 @@ Réponds UNIQUEMENT avec le type, rien d'autre."""
             puissance = current_offer.get('puissance_souscrite', '')
             if puissance:
                 try:
-                    kva = float(re.search(r'(\d+)', puissance).group(1))
+                    kva = float(re.search(r'(\d+)', str(puissance)).group(1))
                     if kva > 6:
                         issues.append(f"Puissance souscrite élevée ({kva} kVA) - vérifier si nécessaire")
                 except:
@@ -400,7 +427,7 @@ Réponds UNIQUEMENT avec le type, rien d'autre."""
         elif invoice_type in ['internet', 'internet_mobile']:
             # Engagement
             engagement = current_offer.get('engagement', '')
-            if engagement and '2026' in engagement:
+            if engagement and '2026' in str(engagement):
                 issues.append("Engagement longue durée limitant la flexibilité")
 
             # Services non utilisés
@@ -416,59 +443,6 @@ Réponds UNIQUEMENT avec le type, rien d'autre."""
         # Limite à 4 issues comme demandé
         return issues[:4]
 
-    def _calculate_best_savings(self, structured_data: Dict, competitive_offers: List[Dict]) -> Dict:
-        """Calcule les économies selon les instructions utilisateur"""
-
-        current_offer = structured_data.get('current_offer', {})
-        best_saving = {
-            'fournisseur_recommande': '',
-            'economie_annuelle': 0,
-            'pourcentage_economie': 0,
-            'action_recommandee': ''
-        }
-
-        # Extraire le coût actuel
-        current_cost = self._extract_annual_cost(current_offer)
-
-        if not current_cost or not competitive_offers:
-            return {
-                'fournisseur_recommande': 'Analyse approfondie recommandée',
-                'economie_annuelle': 'À déterminer',
-                'pourcentage_economie': 'Variable',
-                'action_recommandee': 'Comparer les offres détaillées'
-            }
-
-        # Calculer économies pour chaque offre
-        max_saving = 0
-        best_offer = None
-
-        for offer in competitive_offers:
-            offer_cost = self._extract_annual_cost(offer)
-            if offer_cost and offer_cost < current_cost:
-                saving = current_cost - offer_cost
-                if saving > max_saving:
-                    max_saving = saving
-                    best_offer = offer
-
-        if best_offer:
-            percentage = (max_saving / current_cost) * 100
-            best_saving = {
-                'fournisseur_recommande': best_offer.get('fournisseur', ''),
-                'economie_annuelle': f"{max_saving:.2f}€",
-                'pourcentage_economie': f"{percentage:.1f}%",
-                'action_recommandee': f"Changer pour {best_offer.get('fournisseur', '')} - {best_offer.get('offre', '')}"
-            }
-
-        return best_saving
-
-    def _extract_consumption_value(self, text: str) -> int:
-        """Extrait une valeur de consommation"""
-        try:
-            match = re.search(r'(\d+)', str(text).replace(' ', ''))
-            return int(match.group(1)) if match else 5000
-        except:
-            return 5000
-
     def _extract_price_value(self, text: str) -> float:
         """Extrait une valeur de prix"""
         try:
@@ -477,59 +451,6 @@ Réponds UNIQUEMENT avec le type, rien d'autre."""
             return float(cleaned)
         except:
             return 0.0
-
-    def _extract_annual_cost(self, offer: Dict) -> float:
-        """Extrait ou calcule le coût annuel"""
-        # Essayer le total annuel direct
-        total = offer.get('montant_total_annuel') or offer.get('total_annuel', '')
-        if total:
-            cost = self._extract_price_value(total)
-            if cost > 0:
-                return cost
-
-        # Calculer depuis mensuel
-        monthly = offer.get('prix_mensuel', '')
-        if monthly:
-            monthly_cost = self._extract_price_value(monthly)
-            if monthly_cost > 0:
-                return monthly_cost * 12
-
-        # Calculer depuis kWh + abonnement
-        prix_kwh = self._extract_price_value(offer.get('prix_kwh', '0'))
-        abonnement = self._extract_price_value(offer.get('abonnement_annuel', '0'))
-        consommation = self._extract_consumption_value(offer.get('consommation_annuelle', '0'))
-
-        if prix_kwh > 0 and consommation > 0:
-            return (prix_kwh * consommation) + abonnement
-
-        return 0
-
-    def _merge_and_deduplicate_offers(self, offers: List[Dict]) -> List[Dict]:
-        """Fusionne et déduplique les offres"""
-        unique_offers = {}
-
-        for offer in offers:
-            key = f"{offer.get('fournisseur', '')}-{offer.get('offre', '')}"
-            if key not in unique_offers:
-                unique_offers[key] = offer
-
-        return list(unique_offers.values())
-
-    def _rank_offers_by_savings(self, offers: List[Dict], structured_data: Dict) -> List[Dict]:
-        """Classe les offres par économies potentielles"""
-        current_cost = self._extract_annual_cost(structured_data.get('current_offer', {}))
-
-        for offer in offers:
-            offer_cost = self._extract_annual_cost(offer)
-            if current_cost and offer_cost:
-                offer['savings_potential'] = current_cost - offer_cost
-            else:
-                offer['savings_potential'] = 0
-
-        # Trier par économies décroissantes
-        offers.sort(key=lambda x: x.get('savings_potential', 0), reverse=True)
-
-        return offers
 
     def _get_methodology(self, invoice_type: str) -> str:
         """Retourne la méthodologie adaptée"""
