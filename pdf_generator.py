@@ -197,30 +197,31 @@ class AdaptivePDFGenerator:
         if anonymize:
             fournisseur = 'Fournisseur Actuel'
 
-        story.append(Paragraph(f"■ Offre actuelle {data.get('type_facture', 'énergie')} – {fournisseur}", styles['section_title']))
+        story.append(Paragraph(f"■ Offre actuelle {data.get('type_facture', 'énergie')} – {fournisseur}",
+                               styles['section_title']))
 
         # Détails selon format demandé
         details = []
         if current.get('offre_nom'):
             details.append(f"Offre : {current['offre_nom']}")
-        
+
         if data.get('type_facture') == 'electricite':
             if current.get('option_tarifaire'):
                 details.append(f"Option tarifaire : {current['option_tarifaire']}")
             if current.get('puissance_souscrite'):
                 details.append(f"Puissance souscrite : {current['puissance_souscrite']} kVA")
-        
+
         if current.get('consommation_annuelle'):
             details.append(f"Consommation annuelle réelle : {current['consommation_annuelle']} kWh")
-        
+
         if current.get('montant_total_annuel'):
             details.append(f"Montant total payé sur 12 mois : {current['montant_total_annuel']} € TTC")
-        
+
         if current.get('prix_moyen_ttc'):
             details.append(f"Prix moyen constaté : {current['prix_moyen_ttc']} €/kWh TTC")
         elif current.get('prix_kwh'):
             details.append(f"Prix du kWh : {current['prix_kwh']} € TTC")
-        
+
         if current.get('abonnement_annuel'):
             details.append(f"Abonnement annuel : {current['abonnement_annuel']} € TTC")
 
@@ -229,7 +230,8 @@ class AdaptivePDFGenerator:
 
         story.append(Spacer(1, 4 * mm))
 
-    def _add_electricity_comparison_table(self, story: List, data: Dict, styles: Dict, anonymize: bool, tarif_type: str):
+    def _add_electricity_comparison_table(self, story: List, data: Dict, styles: Dict, anonymize: bool,
+                                          tarif_type: str):
         """Tableau comparatif électricité selon format demandé"""
         alternatives = data.get('alternatives', [])
         if not alternatives:
@@ -260,7 +262,8 @@ class AdaptivePDFGenerator:
 
         # Trier par coût total
         try:
-            filtered_alternatives.sort(key=lambda x: float(x.get('total_annuel', 999999)) if x.get('total_annuel') else 999999)
+            filtered_alternatives.sort(
+                key=lambda x: float(x.get('total_annuel', 999999)) if x.get('total_annuel') else 999999)
         except Exception:
             pass
 
@@ -376,7 +379,7 @@ class AdaptivePDFGenerator:
     def _add_hidden_issues_section(self, story: List, data: Dict, styles: Dict):
         """Section pièges détectés (au moins 3 pièges)"""
         issues = data.get('detected_issues', [])
-        
+
         story.append(Paragraph("■ Pièges détectés dans l'offre actuelle", styles['section_title']))
 
         if issues:
@@ -410,7 +413,8 @@ class AdaptivePDFGenerator:
             text = f"En changeant pour {fournisseur}, vous pourriez économiser jusqu'à {economie}/an à consommation constante."
             story.append(Paragraph(text, styles['savings_highlight']))
         else:
-            story.append(Paragraph("Analyse personnalisée requise pour calculer vos économies exactes.", styles['offer_details']))
+            story.append(Paragraph("Analyse personnalisée requise pour calculer vos économies exactes.",
+                                   styles['offer_details']))
 
         story.append(Spacer(1, 6 * mm))
 
@@ -424,7 +428,9 @@ class AdaptivePDFGenerator:
         )
         story.append(Paragraph(methodology_text, styles['methodology']))
 
-        story.append(Paragraph("Les comparaisons sont faites à partir de sources vérifiables (sites fournisseurs, simulateurs certifiés).", styles['methodology']))
+        story.append(Paragraph(
+            "Les comparaisons sont faites à partir de sources vérifiables (sites fournisseurs, simulateurs certifiés).",
+            styles['methodology']))
 
         # Ajouter le snapshot d'offres si disponible
         snapshot = data.get('_offers_snapshot_date')
@@ -432,7 +438,9 @@ class AdaptivePDFGenerator:
             story.append(Paragraph(f"Snapshot d'offres utilisé : {snapshot}", styles['methodology']))
 
         story.append(Spacer(1, 3 * mm))
-        story.append(Paragraph("■ Rapport indépendant, sans publicité ni affiliation. Son seul but : identifier vos économies possibles.", styles['methodology']))
+        story.append(Paragraph(
+            "■ Rapport indépendant, sans publicité ni affiliation. Son seul but : identifier vos économies possibles.",
+            styles['methodology']))
 
     def _get_energy_styles(self) -> Dict:
         """Styles pour rapports énergie"""

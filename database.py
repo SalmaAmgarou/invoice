@@ -45,7 +45,7 @@ class OffreEnergie(Base):
     date_extraction = Column(Date, nullable=False, default=func.current_date())
 
     # --- Champs d'identification ---
-    type_service = Column(String(50), nullable=False)  # 'electricite', 'gaz', 'duale', 'eau'
+    type_service = Column(String(50), nullable=False)    # 'electricite', 'gaz', 'duale', 'eau'
     fournisseur = Column(String(255), nullable=False)
     nom_offre = Column(String(255))
     zone_desserte = Column(String(255))

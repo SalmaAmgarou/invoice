@@ -233,11 +233,31 @@ async def analyze_invoice_fixed(
         phone: str = Form(...),
         accept_callback: bool = Form(True),
         user_id: Optional[int] = Form(None),
+        invoice_type: str = Form(...),  # NOUVEAU: Type de facture obligatoire
         invoice: UploadFile = File(...),
         db: Session = Depends(get_db)
 ):
-    """Analyse corrigée avec formatage PDF professionnel"""
+    """Analyse corrigée avec type de facture défini par l'utilisateur"""
     try:
+        # Validation du type de facture
+        VALID_INVOICE_TYPES = [
+            'electricite', 'gaz', 'dual', 'electricite_gaz',
+            'internet', 'mobile', 'internet_mobile',
+            'eau', 'assurance_auto', 'assurance_habitation'
+        ]
+
+        if invoice_type not in VALID_INVOICE_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Type de facture invalide. Types acceptés: {', '.join(VALID_INVOICE_TYPES)}"
+            )
+
+        # Normaliser dual/electricite_gaz
+        if invoice_type == 'electricite_gaz':
+            invoice_type = 'dual'
+
+        logger.info(f"📋 Type de facture défini par l'utilisateur: {invoice_type}")
+
         # Validation du fichier
         if not invoice.filename:
             raise HTTPException(status_code=400, detail="Aucun fichier fourni")
@@ -245,7 +265,7 @@ async def analyze_invoice_fixed(
         if not allowed_file(invoice.filename):
             raise HTTPException(status_code=400, detail="Type de fichier non valide")
 
-        logger.info(f"🔧 Début analyse corrigée: {invoice.filename}")
+        logger.info(f"🔧 Début analyse pour type {invoice_type}: {invoice.filename}")
 
         # Créer ou récupérer utilisateur
         if not user_id:
@@ -299,51 +319,43 @@ async def analyze_invoice_fixed(
         clean_text = ocr_processor.preprocess_text(extracted_text)
         logger.info(f"✅ OCR réussi: {len(clean_text)} caractères")
 
-        # ÉTAPE 2: Analyse IA corrigée avec détection de type
-        logger.info("🤖 Analyse IA corrigée avec détection de type...")
-        
-        # D'abord, récupérer les offres DB pour le type détecté
-        logger.info("📊 Récupération des offres depuis la BD...")
-        
-        # Détecter le type via heuristiques rapides
-        def _quick_type_detection(text: str) -> str:
-            text_lower = text.lower()
-            if any(word in text_lower for word in ['kwh', 'électricité', 'edf', 'kva']):
-                return 'electricite'
-            elif any(word in text_lower for word in ['gaz', 'm3', 'mètres cubes', 'grdf']):
-                return 'gaz'
-            elif any(word in text_lower for word in ['internet', 'fibre', 'livebox', 'freebox']):
-                return 'internet_mobile'
-            else:
-                return 'electricite'  # Default fallback
-        
-        quick_type = _quick_type_detection(clean_text)
-        
-        # Récupérer le dernier snapshot d'offres pour le type
-        latest_date = db.query(OffreEnergie.date_extraction) \
-            .filter(OffreEnergie.type_service == quick_type) \
-            .order_by(OffreEnergie.date_extraction.desc()).limit(1).scalar()
-        
-        db_offers = []
-        if latest_date:
-            q = db.query(OffreEnergie).filter(
-                OffreEnergie.type_service == quick_type,
+        # ÉTAPE 2: Récupération des offres de la BD selon le type
+        logger.info(f"📊 Récupération des offres depuis la BD pour type: {invoice_type}")
+
+        # Fonction helper pour récupérer les offres
+        def _get_offers_from_db(db_session, service_type):
+            # Récupérer le dernier snapshot d'offres pour le type
+            latest_date = db_session.query(OffreEnergie.date_extraction) \
+                .filter(OffreEnergie.type_service == service_type) \
+                .order_by(OffreEnergie.date_extraction.desc()).limit(1).scalar()
+
+            if not latest_date:
+                return []
+
+            offers = db_session.query(OffreEnergie).filter(
+                OffreEnergie.type_service == service_type,
                 OffreEnergie.date_extraction == latest_date
-            )
-            offers = q.all()
-            
-            # Convertir en format compatible avec le LLM
-            db_offers = []
+            ).all()
+
+            # Convertir en format pour le LLM
+            formatted_offers = []
             for off in offers:
                 prix_unite = float(off.prix_unite_ttc or 0)
                 abo = float(off.abonnement_annuel_ttc or 0)
-                
-                # Calculer le total annuel estimé (consommation par défaut)
-                consommation_defaut = 3500.0 if quick_type == 'electricite' else 10000.0 if quick_type == 'gaz' else 0.0
+
+                # Calculer le total annuel estimé
+                if service_type == 'electricite':
+                    consommation_defaut = 3500.0
+                elif service_type == 'gaz':
+                    consommation_defaut = 10000.0
+                elif service_type in ['internet', 'mobile', 'internet_mobile']:
+                    consommation_defaut = 12  # 12 mois
+                else:
+                    consommation_defaut = 0.0
+
                 total_annuel = prix_unite * consommation_defaut + abo if prix_unite > 0 else 0.0
-                
-                # Normaliser les données pour le LLM
-                db_offer = {
+
+                formatted_offer = {
                     'fournisseur': off.fournisseur,
                     'nom_offre': off.nom_offre or '',
                     'prix_kwh': prix_unite,
@@ -353,99 +365,132 @@ async def analyze_invoice_fixed(
                     'duree_engagement': off.duree_engagement or 'sans engagement',
                     'energie_verte_pct': off.energie_verte_pct or 0,
                     'caracteristiques': off.caracteristiques or [],
-                    'classement_comparateurs': off.classement_comparateurs or '',
                     'details': off.details or {}
                 }
-                
-                # Pour l'électricité, créer des variantes BASE et HP/HC
-                if quick_type == 'electricite':
+
+                # Pour l'électricité, créer variantes BASE et HP/HC
+                if service_type == 'electricite':
                     # Version BASE
-                    base_offer = db_offer.copy()
+                    base_offer = formatted_offer.copy()
                     base_offer['type_offre'] = 'base'
                     base_offer['nom_offre'] = f"{off.nom_offre} - Base"
-                    db_offers.append(base_offer)
-                    
-                    # Version HP/HC (avec prix légèrement différents)
-                    hphc_offer = db_offer.copy()
+                    formatted_offers.append(base_offer)
+
+                    # Version HP/HC
+                    hphc_offer = formatted_offer.copy()
                     hphc_offer['type_offre'] = 'hphc'
                     hphc_offer['nom_offre'] = f"{off.nom_offre} HP/HC"
-                    hphc_offer['prix_kwh'] = round(prix_unite * 1.15, 4)  # +15% pour HP
+                    hphc_offer['prix_kwh'] = round(prix_unite * 1.15, 4)
                     hphc_offer['details'] = {
                         'prix_hp': round(prix_unite * 1.15, 4),
-                        'prix_hc': round(prix_unite * 0.85, 4),  # -15% pour HC
+                        'prix_hc': round(prix_unite * 0.85, 4),
                         'repartition_hp_hc': '70% HP / 30% HC'
                     }
-                    # Recalculer le total avec prix moyen HP/HC
-                    prix_moyen_hphc = (hphc_offer['details']['prix_hp'] * 0.7 + hphc_offer['details']['prix_hc'] * 0.3)
+                    prix_moyen_hphc = (hphc_offer['details']['prix_hp'] * 0.7 +
+                                       hphc_offer['details']['prix_hc'] * 0.3)
                     hphc_offer['total_annuel'] = round(prix_moyen_hphc * consommation_defaut + abo, 2)
-                    db_offers.append(hphc_offer)
+                    formatted_offers.append(hphc_offer)
                 else:
-                    # Gaz et autres: pas de distinction
-                    db_offer['type_offre'] = 'standard'
-                    db_offers.append(db_offer)
-            
-            logger.info(f"✅ {len(db_offers)} offres récupérées depuis la BD (snapshot: {latest_date})")
+                    formatted_offer['type_offre'] = 'standard'
+                    formatted_offers.append(formatted_offer)
+
+            return formatted_offers
+
+        # Récupérer les offres selon le type
+        db_offers = []
+        if invoice_type == 'dual':
+            # Pour dual, récupérer les offres électricité ET gaz
+            db_offers_elec = _get_offers_from_db(db, 'electricite')
+            db_offers_gaz = _get_offers_from_db(db, 'gaz')
+            db_offers = db_offers_elec + db_offers_gaz
+            logger.info(f"✅ {len(db_offers_elec)} offres électricité + {len(db_offers_gaz)} offres gaz récupérées")
+        elif invoice_type in ['eau', 'assurance_auto', 'assurance_habitation']:
+            # Pas d'offres comparatives pour ces types (monopoles ou contrats spécifiques)
+            db_offers = []
+            logger.info(f"ℹ️ Pas de comparaison d'offres pour {invoice_type}")
         else:
-            logger.warning("Aucun snapshot d'offres trouvé pour la comparaison.")
-        
-        # Maintenant analyser avec le LLM en incluant les offres DB (RAG-style)
-        analysis_result = ai_analyzer.analyze_invoice(clean_text, db_offers)
+            db_offers = _get_offers_from_db(db, invoice_type)
+            logger.info(f"✅ {len(db_offers)} offres récupérées pour {invoice_type}")
+
+        # ÉTAPE 3: Analyse IA avec type prédéfini
+        logger.info(f"🤖 Analyse IA pour type: {invoice_type}")
+
+        # Utiliser la nouvelle méthode avec type prédéfini
+        analysis_result = ai_analyzer.analyze_invoice_with_type(
+            clean_text,
+            invoice_type,
+            db_offers
+        )
 
         structured_data = analysis_result['structured_data']
-        invoice_type = structured_data.get('type_facture', 'inconnu')
-        invoice_subtype = structured_data.get('invoice_subtype', 'standard')
 
-        logger.info(f"✅ Type détecté: {invoice_type} ({invoice_subtype})")
+        # Ajouter le type défini par l'utilisateur
+        structured_data['type_facture'] = invoice_type
+        structured_data['invoice_subtype'] = 'user_defined'
 
-        # ÉTAPE 3: Validation et normalisation des données extraites
+        logger.info(f"✅ Analyse complétée pour type: {invoice_type}")
+
+        # ÉTAPE 4: Validation et normalisation des données extraites
         logger.info("🔍 Validation et normalisation des données...")
-        
+
         def _validate_and_normalize(data: dict) -> dict:
             """Valide et normalise les données extraites"""
             current_offer = data.get('current_offer', {})
-            
+
             # Normaliser les montants
             if current_offer.get('montant_total_annuel'):
                 try:
-                    montant = float(str(current_offer['montant_total_annuel']).replace(',', '.').replace('€', '').strip())
+                    montant = float(
+                        str(current_offer['montant_total_annuel']).replace(',', '.').replace('€', '').strip())
                     current_offer['montant_total_annuel'] = round(montant, 2)
                 except:
                     current_offer['montant_total_annuel'] = 0
-            
-            # Normaliser la consommation
-            if current_offer.get('consommation_annuelle'):
-                try:
-                    cons = float(str(current_offer['consommation_annuelle']).replace(',', '.').replace('kWh', '').strip())
-                    current_offer['consommation_annuelle'] = round(cons, 0)
-                except:
-                    current_offer['consommation_annuelle'] = 0
-            
-            # Normaliser le prix kWh
-            if current_offer.get('prix_kwh'):
-                try:
-                    prix = float(str(current_offer['prix_kwh']).replace(',', '.').replace('€', '').strip())
-                    current_offer['prix_kwh'] = round(prix, 4)
-                except:
-                    current_offer['prix_kwh'] = 0
-            
+
+            # Normaliser la consommation selon le type
+            if invoice_type in ['electricite', 'gaz', 'dual']:
+                if current_offer.get('consommation_annuelle'):
+                    try:
+                        cons = float(
+                            str(current_offer['consommation_annuelle']).replace(',', '.').replace('kWh', '').strip())
+                        current_offer['consommation_annuelle'] = round(cons, 0)
+                    except:
+                        current_offer['consommation_annuelle'] = 0
+
+                if current_offer.get('prix_kwh'):
+                    try:
+                        prix = float(str(current_offer['prix_kwh']).replace(',', '.').replace('€', '').strip())
+                        current_offer['prix_kwh'] = round(prix, 4)
+                    except:
+                        current_offer['prix_kwh'] = 0
+
+            elif invoice_type == 'eau':
+                if current_offer.get('consommation_annuelle_m3'):
+                    try:
+                        cons = float(
+                            str(current_offer['consommation_annuelle_m3']).replace(',', '.').replace('m³', '').strip())
+                        current_offer['consommation_annuelle_m3'] = round(cons, 0)
+                    except:
+                        current_offer['consommation_annuelle_m3'] = 0
+
             # Calculer le prix moyen si possible
-            if current_offer.get('montant_total_annuel') and current_offer.get('consommation_annuelle'):
+            if invoice_type in ['electricite', 'gaz'] and current_offer.get(
+                    'montant_total_annuel') and current_offer.get('consommation_annuelle'):
                 montant = current_offer['montant_total_annuel']
                 cons = current_offer['consommation_annuelle']
                 if cons > 0:
                     prix_moyen = montant / cons
                     current_offer['prix_moyen_ttc'] = round(prix_moyen, 4)
-            
+
             return data
-        
+
         structured_data = _validate_and_normalize(structured_data)
-        
-        # Ajouter les métadonnées des offres
-        if latest_date:
-            structured_data['_offers_snapshot_date'] = str(latest_date)
-            structured_data['_offers_version_source'] = 'donnees_energie.json import'
-        
-        # ÉTAPE 4: Calcul des économies (maintenant géré par le LLM avec les offres DB)
+
+        # Ajouter les métadonnées
+        if db_offers:
+            structured_data['_offers_count'] = len(db_offers)
+            structured_data['_analysis_type'] = 'user_defined_type'
+
+        # ÉTAPE 5: Calcul des économies
         savings = None
         best_savings = structured_data.get('best_savings', {})
         if best_savings.get('economie_annuelle'):
@@ -453,17 +498,17 @@ async def analyze_invoice_fixed(
                 savings = float(str(best_savings['economie_annuelle']).replace('€', '').strip())
             except:
                 savings = None
-        
+
         if savings:
             logger.info(f"💰 Économies calculées: {savings}€/an")
         else:
-            logger.info(f"💰 Économies: À évaluer (type: {invoice_subtype})")
+            logger.info(f"💰 Économies: À évaluer pour type {invoice_type}")
 
-        # ÉTAPE 5: Génération PDF corrigée
-        logger.info("📄 Génération PDF avec corrections...")
+        # ÉTAPE 6: Génération PDF
+        logger.info("📄 Génération PDF...")
         internal_pdf_path, user_pdf_path = pdf_generator.generate_reports(structured_data, user_id)
 
-        # ÉTAPE 6: Sauvegarde
+        # ÉTAPE 7: Sauvegarde en base de données
         invoice_record = Invoice(
             user_id=user_id,
             file_path=temp_path,
@@ -474,7 +519,7 @@ async def analyze_invoice_fixed(
         db.add(invoice_record)
         db.commit()
 
-        # ÉTAPE 6: Résumé pour popup
+        # ÉTAPE 8: Résumé pour popup
         popup_summary = pdf_generator.generate_popup_summary(structured_data)
 
         # Nettoyage
@@ -485,18 +530,18 @@ async def analyze_invoice_fixed(
             logger.warning(f"Impossible de supprimer {temp_path}: {e}")
 
         # Résultat final
-        logger.info(f"✅ Analyse corrigée terminée pour {email}")
+        logger.info(f"✅ Analyse terminée pour {email} - Type: {invoice_type}")
 
         # Évaluation qualité
         quality_score = "excellent" if len(clean_text) > 500 else "bon" if len(clean_text) > 200 else "moyen"
 
         return FixedAnalysisResult(
             success=True,
-            message=f"Analyse corrigée complétée - Type: {invoice_type} ({invoice_subtype})",
+            message=f"Analyse complétée - Type: {invoice_type} (défini par l'utilisateur)",
             ai_result=popup_summary,
             pdf_url=user_pdf_path,
             savings=savings,
-            invoice_type=f"{invoice_type}_{invoice_subtype}",
+            invoice_type=invoice_type,
             quality_score=quality_score
         )
 
@@ -511,7 +556,6 @@ async def analyze_invoice_fixed(
         except:
             pass
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse: {str(e)}")
-
 
 @app.get("/api/download-report/{filename}")
 async def download_report(filename: str):
@@ -636,6 +680,22 @@ async def get_corrections_info():
         ]
     }
 
+@app.get("/api/invoice-types")
+async def get_invoice_types():
+    """Retourne la liste des types de factures supportés"""
+    return {
+        "types": [
+            {"value": "electricite", "label": "Électricité", "description": "Facture d'électricité uniquement"},
+            {"value": "gaz", "label": "Gaz naturel", "description": "Facture de gaz uniquement"},
+            {"value": "dual", "label": "Électricité + Gaz", "description": "Offre duale du même fournisseur"},
+            {"value": "internet", "label": "Internet/Fibre", "description": "Internet, fibre, ADSL"},
+            {"value": "mobile", "label": "Mobile", "description": "Forfait mobile uniquement"},
+            {"value": "internet_mobile", "label": "Internet + Mobile", "description": "Pack convergent"},
+            {"value": "eau", "label": "Eau", "description": "Service d'eau et assainissement"},
+            {"value": "assurance_auto", "label": "Assurance Auto", "description": "Assurance véhicule"},
+            {"value": "assurance_habitation", "label": "Assurance Habitation", "description": "Assurance logement"}
+        ]
+    }
 
 if __name__ == "__main__":
     import uvicorn
