@@ -20,7 +20,7 @@ from typing import List, Dict, Any, Tuple, Optional
 # --- OpenAI ---
 from openai import OpenAI
 from config import Config
-
+import re
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
 # --- PDF / OCR ---
@@ -44,7 +44,7 @@ from reportlab.pdfgen import canvas as rl_canvas
 PALETTE = {
     "primary_blue": "#2563EB",   # Main accent blue
     "brand_yellow": "#F0BC00",   # Pioui yellow (NEW)
-    "dark_navy": "#1E293B",      # Header/footer backgrounds
+    "dark_navy": "#e6efff",      # Header/footer backgrounds
     "text_dark": "#0F172A",      # Main text
     "text_muted": "#64748B",     # Subtitles
     "bg_light": "#F8FAFC",       # Zebra rows
@@ -57,7 +57,8 @@ PALETTE = {
 PIOUI = {
     "url": "https://pioui.com",
     "email": "service.client@pioui.com",
-    "addr": "562-78 avenue des Champs-Élysées, 75008 Paris",
+    "name":"ND CONSULTING, société à responsabilité limitée, au capital de 100 euros",
+    "addr": "Bureau 562-78 avenue des Champs-Élysées, 75008 Paris",
     "tel": "01 62 19 95 72",
     "copyright": f"Copyright © {date.today().year} / 2025, All Rights Reserved."
 }
@@ -98,6 +99,91 @@ def _to_float(x, default=None):
         return float(str(x).replace(",", "."))
     except Exception:
         return default
+
+def _to_int(x, default=None):
+    try:
+        return int(str(x).strip())
+    except Exception:
+        return default
+
+def _find_first_int(pattern: str, text: str, flags=re.I|re.S):
+    m = re.search(pattern, text, flags)
+    return _to_int(m.group(1)) if m else None
+
+def try_parse_car_annual_kwh(text: str) -> Optional[float]:
+    # Ex: "Consommation Annuelle de Référence : 631 kWh"
+    n = _find_first_int(r"Consommation\s+Annuelle\s+de\s+Référence.*?:\s*([\d\s]{1,7})\s*kWh", text)
+    return float(n) if n is not None else None
+
+def try_parse_monthly_kwh_sum(text: str) -> Optional[float]:
+    # Ex bloc "ma consommation (kWh) ... 112 90 45 44 ..."
+    m = re.search(r"ma\s+consommation\s*\(kWh\)(.*)", text, re.I|re.S)
+    if not m:
+        return None
+    block = m.group(1)
+    nums = [int(x) for x in re.findall(r"\b(\d{1,5})\b", block)]
+    if len(nums) >= 6:
+        # somme les 12 premiers entiers plausibles si dispo
+        return float(sum(nums[:12])) if len(nums) >= 12 else float(sum(nums))
+    return None
+
+def try_parse_period_kwh_from_detail(text: str) -> Optional[float]:
+    """
+    Cherche dans "Détail de ma facture" des lignes avec 'Conso (kWh) <n>'.
+    On somme toutes les occurrences sur la période.
+    """
+    # restreindre au bloc "Détail" si possible
+    detail = re.search(r"D[ée]tail\s+de\s+ma\s+facture(.*?)(?:TOTAL|TVA|$)", text, re.I|re.S)
+    scope = detail.group(1) if detail else text
+    vals = [int(x) for x in re.findall(r"Conso\s*\(kWh\)\s*([0-9]{1,6})", scope, re.I)]
+    if vals:
+        return float(sum(vals))
+    return None
+
+def try_parse_m3_and_coef_to_kwh(text: str) -> Optional[float]:
+    """
+    Si on ne trouve pas kWh directement, tenter 'Conso (m3)' et 'Coefficient ... : <coef>'
+    """
+    m3s = re.findall(r"Conso\s*\(m3\)\s*([\d\.,]+)", text, re.I)
+    coef = re.search(r"Coefficient\s+de\s+conversion.*?:\s*([\d\.,]+)", text, re.I)
+    if not m3s or not coef:
+        return None
+    def f(x): return _to_float(x.replace(" ", ""))
+    coef_v = f(coef.group(1))
+    if not coef_v:
+        return None
+    total_m3 = sum([f(x) or 0.0 for x in m3s])
+    kwh = total_m3 * coef_v
+    return float(kwh) if kwh > 0 else None
+
+def derive_consumptions_from_text(raw_text: str,
+                                  energy: str,
+                                  period_days: Optional[int]) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Retourne (period_kwh, annual_kwh) en combinant plusieurs indices du PDF.
+    Priorités:
+      - Annuel: CAR > somme 'ma consommation (kWh)' > extrapolation (si période dispo)
+      - Période: somme des 'Conso (kWh)' dans le détail > m3*coef
+    """
+    period_kwh = try_parse_period_kwh_from_detail(raw_text)
+    if period_kwh in (None, 0.0):
+        alt = try_parse_m3_and_coef_to_kwh(raw_text)
+        period_kwh = alt if alt not in (None, 0.0) else period_kwh
+
+    annual_kwh = try_parse_car_annual_kwh(raw_text)
+    if annual_kwh in (None, 0.0):
+        annual_kwh = try_parse_monthly_kwh_sum(raw_text)
+
+    if (annual_kwh in (None, 0.0)) and period_kwh and period_days and period_days > 0:
+        annual_kwh = period_kwh * (365.0 / float(period_days))
+
+    # Nettoyage final
+    if period_kwh is not None and period_kwh < 0:
+        period_kwh = None
+    if annual_kwh is not None and annual_kwh <= 0:
+        annual_kwh = None
+
+    return (period_kwh, annual_kwh)
 
 def _parse_date_fr(s: str) -> Optional[dt]:
     try:
@@ -179,7 +265,7 @@ Texte:
     return resp.choices[0].message.content
 
 # ───────────────── Data processing ─────────────────
-def params_from_energy(global_json: dict, energy_obj: dict) -> dict:
+def params_from_energy(global_json: dict, energy_obj: dict, raw_text: str) -> dict:
     zipcode = ((global_json.get("client") or {}).get("zipcode")) or "75001"
     periode = global_json.get("periode") or {}
     jours = periode.get("jours")
@@ -196,16 +282,40 @@ def params_from_energy(global_json: dict, energy_obj: dict) -> dict:
             kva = int(energy_obj.get("puissance_kVA") or 6)
         except Exception:
             kva = 6
-    conso = _to_float(energy_obj.get("conso_kwh"))
-    if conso is None:
-        conso = 3500.0 if energy == "electricite" else 12000.0
+
+    # 1) Dérive conso depuis le PDF (robuste)
+    period_kwh_txt, annual_kwh_txt = derive_consumptions_from_text(raw_text, energy, jours)
+
+    # 2) Lis la valeur GPT si dispo (peut être période ou annuel… on l’utilise en secours uniquement si > 0)
+    conso_gpt = _to_float(energy_obj.get("conso_kwh"))
+
+    # 3) Choix finaux
+    #    - conso période = priorité au texte; sinon, si GPT paraît raisonnable ET jours connus (=> sans doute une période), on prend GPT
+    period_kwh = period_kwh_txt
+    if (period_kwh in (None, 0.0)) and conso_gpt and conso_gpt > 0 and jours:
+        period_kwh = conso_gpt
+
+    #    - conso annuelle = priorité CAR/“ma consommation”; sinon extrapolation période; sinon, si GPT est grand et jours inconnus, on suppose que GPT est annuel
+    annual_kwh = annual_kwh_txt
+    if annual_kwh in (None, 0.0):
+        if period_kwh and jours:
+            annual_kwh = period_kwh * (365.0 / float(jours))
+        elif conso_gpt and conso_gpt > 0 and not jours:
+            annual_kwh = conso_gpt  # suppose annuel (faute d'indice meilleur)
 
     return {
-        "energy": "gaz" if energy == "gaz" else "electricite",
+        "energy": "gaz" if energy.startswith("gaz") else "electricite",
         "zipcode": zipcode,
-        "kva": kva,
+        "kva": kva if energy == "electricite" else None,
         "option": option if energy == "electricite" else None,
-        "consumption_kwh": conso,  # (logic unchanged)
+
+        # ⇩ nouvelles clés explicites
+        "period_kwh": period_kwh,      # conso de la période (pour calcul prix/kWh observé)
+        "annual_kwh": annual_kwh,      # conso annuelle (pour chiffrer les offres)
+
+        # compat: on laisse 'consumption_kwh' pointer sur l'annuel (plus jamais 0 pour le pricing)
+        "consumption_kwh": annual_kwh,
+
         "hp_share": 0.35 if (option and str(option).upper().startswith("HP")) else None,
         "period_days": jours,
         "total_ttc_period": _to_float(energy_obj.get("total_ttc")),
@@ -271,6 +381,7 @@ def make_hphc_offers(params: dict, current_total: float) -> List[Dict[str, Any]]
     if params["energy"] != "electricite":
         return []
     conso = float(params["consumption_kwh"])
+
     hp_share = params.get("hp_share") or 0.35
     providers = _choose_providers("electricite", avoid=params.get("fournisseur"), k=3)
     discounts = [0.12, 0.11, 0.10]
@@ -290,41 +401,375 @@ def make_hphc_offers(params: dict, current_total: float) -> List[Dict[str, Any]]
         })
     out.sort(key=lambda x: x["total_annuel_estime"])
     return out
+# ───────────────── Vices cachés — Base de règles par fournisseur/offre ─────────────────
+# Catégories (ajout de 2 génériques pour atteindre 6 par type)
+VC = {
+    "ELEC_TRV_SUP": "Tarif supérieur au TRV (à vérifier sur la période de facturation)",
+    "ELEC_REMISE_TEMP": "Remise temporaire déguisée (prix d'appel limité dans le temps)",
+    "ELEC_VERT_NON_CERT": "Option verte non certifiée (labels/garanties d'origine floues)",
+    "ELEC_DOUBLE_ABO": "Double abonnement (compteur secondaire / services additionnels)",
+    "ELEC_INDEX_OPAQUE": "Indexation non transparente (référence ambiguë, révision discrétionnaire)",
+    "GEN_FRAIS_GESTION": "Frais de service/gestion additionnels peu transparents",
 
+    "GAZ_SUP_REPERE": "Prix > Prix repère CRE pour profil comparable",
+    "GAZ_INDEX_SANS_PLAFO": "Tarif indexé sans plafond (exposition forte aux hausses)",
+    "GAZ_FRAIS_ABUSIFS": "Frais techniques (mise en service, déplacement) supérieurs aux barèmes GRDF",
+    "GAZ_PROMO_TROMPEUSE": "Promotion trompeuse (conditions d’éligibilité restrictives)",
+    "GAZ_REVISION_ENGT": "Révision tarifaire possible en cours d’engagement",
+    "GEN_PAIEMENT_IMPOSE": "Mode de paiement imposé / pénalités annexes",
+}
+
+# Socle générique (peut servir ailleurs)
+_BASE_VICES = {
+    "electricite": [
+        VC["ELEC_TRV_SUP"], VC["ELEC_REMISE_TEMP"], VC["ELEC_VERT_NON_CERT"],
+        VC["ELEC_DOUBLE_ABO"], VC["ELEC_INDEX_OPAQUE"], VC["GEN_FRAIS_GESTION"],
+    ],
+    "gaz": [
+        VC["GAZ_SUP_REPERE"], VC["GAZ_INDEX_SANS_PLAFO"], VC["GAZ_FRAIS_ABUSIFS"],
+        VC["GAZ_PROMO_TROMPEUSE"], VC["GAZ_REVISION_ENGT"], VC["GEN_PAIEMENT_IMPOSE"],
+    ],
+}
+
+# Pool garanti à 6 (ordre de remplissage)
+_GENERIC_6 = {
+    "electricite": _BASE_VICES["electricite"][:],  # déjà 6
+    "gaz": _BASE_VICES["gaz"][:],                  # déjà 6
+}
+
+def _norm(s: str) -> str:
+    import re, unicodedata
+    if not s: return ""
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9+ ]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+# ───────────────── Exceptions & helpers ─────────────────
+class EnergyTypeError(ValueError):
+    pass
+
+class EnergyTypeMismatchError(EnergyTypeError):
+    pass
+
+def normalize_energy_mode(x: str | None) -> str:
+    if not x:
+        return "auto"
+    m = x.strip().lower()
+    mapping = {
+        "auto": "auto",
+        "gaz": "gaz", "gas": "gaz", "g": "gaz",
+        "electricite": "electricite", "électricité": "electricite", "elec": "electricite", "e": "electricite",
+        "dual": "dual", "duale": "dual", "duo": "dual", "pack": "dual",
+    }
+    return mapping.get(m, "invalid")
+
+# ───────────────── Robust signals + scoring + confidence ─────────────────
+def detect_energy_signals(raw_text: str) -> dict:
+    """
+    Retourne un dict:
+      {
+        "scores": {"gaz": s_g, "electricite": s_e},
+        "conf":   {"gaz": c_g, "electricite": c_e},  # [0..1], absolu
+        "decision": set(["gaz", "electricite"]),     # décision heuristique
+      }
+    """
+    import math
+    if not raw_text:
+        return {"scores": {"gaz": 0, "electricite": 0},
+                "conf": {"gaz": 0.0, "electricite": 0.0},
+                "decision": set()}
+
+    t = _norm(raw_text)  # ascii/lower/espaces
+
+    gas_weights = {
+        "pce": 6, "grdf": 5, "gazpar": 5, "ticgn": 5, "coefficient de conversion": 4,
+        "pcs": 3, "gaz naturel": 2, "zone gaz": 2, "classe de consommation": 2,
+        "m3": 1, "gaz": 1
+    }
+    elec_weights = {
+        "pdl": 6, "enedis": 5, "linky": 4, "kva": 4,
+        "heures pleines": 3, "heures creuses": 3, "hp hc": 3,
+        "turpe": 3, "electricite": 1, "elec": 1
+    }
+    marketing_noise = ["electricite et gaz", "électricité et gaz", "elec et gaz",
+                       "pack duo", "duale", "dual", "offre duo", "pack dual"]
+
+    def score(weights: dict) -> int:
+        s = 0
+        for k, w in weights.items():
+            s += t.count(k) * w
+        return s
+
+    s_g = score(gas_weights)
+    s_e = score(elec_weights)
+
+    # Pénalise le bruit marketing (ne doit pas créer une fausse dualité)
+    noise_hits = sum(t.count(n) for n in marketing_noise)
+    if noise_hits:
+        s_g = max(0, s_g - 2 * noise_hits)
+        s_e = max(0, s_e - 2 * noise_hits)
+
+    # Confiances absolues (croissent vite avec le score; bornées à 1)
+    conf_g = 1.0 - math.exp(-s_g / 8.0)
+    conf_e = 1.0 - math.exp(-s_e / 8.0)
+
+    # Décision heuristique (claire et déterministe)
+    decision = set()
+    # marqueurs durs PCE/PDL: s'ils sont exclusifs, ça tranche
+    if "pce" in t and "pdl" not in t:
+        decision = {"gaz"}
+    elif "pdl" in t and "pce" not in t:
+        decision = {"electricite"}
+    else:
+        if s_g == 0 and s_e == 0:
+            decision = set()
+        elif abs(s_g - s_e) >= 3:
+            decision = {"gaz"} if s_g > s_e else {"electricite"}
+        elif max(s_g, s_e) >= 6 and min(s_g, s_e) >= 3:
+            decision = {"gaz", "electricite"}
+        else:
+            decision = {"gaz"} if s_g >= s_e else {"electricite"}
+
+    return {"scores": {"gaz": s_g, "electricite": s_e},
+            "conf": {"gaz": float(conf_g), "electricite": float(conf_e)},
+            "decision": decision}
+
+def filter_energies(parsed: dict, keep: set[str]) -> dict:
+    energies = parsed.get("energies") or []
+    def want(t: str) -> bool:
+        t = (t or "").strip().lower()
+        return any(t.startswith(k) for k in keep)
+    kept = [e for e in energies if want(e.get("type"))]
+    parsed["energies"] = kept
+    return parsed
+
+def ensure_stub(parsed: dict, energy: str) -> dict:
+    energies = parsed.get("energies") or []
+    if not any(((e.get("type") or "").startswith(energy)) for e in energies):
+        stub = {"type": energy}
+        if energy == "electricite":
+            stub["option"] = "Base"
+        energies.append(stub)
+        parsed["energies"] = energies
+    return parsed
+
+def apply_energy_mode(parsed: dict, raw_text: str,
+                      mode: str = "auto",
+                      conf_min: float = 0.75,
+                      strict: bool = True) -> tuple[dict, dict]:
+    """
+    Applique le mode d'énergie demandé:
+      - mode "auto": détecte et filtre en fonction du PDF
+      - mode "gaz"/"electricite": force ce type, mais recheck; si contradiction avec forte confiance, lève une erreur
+      - mode "dual": exige forte confiance sur les deux; sinon lève une erreur
+    Retourne (parsed_modifie, diagnostics)
+    """
+    mode = normalize_energy_mode(mode)
+    if mode == "invalid":
+        raise EnergyTypeError("Paramètre --energy invalide. Utilise: auto | gaz | electricite | dual")
+
+    diag = detect_energy_signals(raw_text)
+    dec = set(diag["decision"])
+    cg, ce = diag["conf"]["gaz"], diag["conf"]["electricite"]
+
+    if mode == "auto":
+        if not dec:
+            # Retombe sur l’heuristique existante si aucune décision
+            parsed = enforce_single_energy_if_clear(parsed, raw_text)
+            return parsed, diag
+        parsed = filter_energies(parsed, dec)
+        if not parsed.get("energies"):
+            # Si GPT n’a rien de valide, crée des stubs pour les types détectés
+            for k in dec:
+                parsed = ensure_stub(parsed, k)
+        return parsed, diag
+
+    if mode in {"gaz", "electricite"}:
+        other = "electricite" if mode == "gaz" else "gaz"
+        # Si l'autre type est fortement probable, bloque (en strict)
+        if strict and diag["conf"][other] >= conf_min and (other in dec) and (mode not in dec):
+            raise EnergyTypeMismatchError(
+                f"Type demandé: {mode}. Mais la facture ressemble plutôt à {other} "
+                f"(confiance {diag['conf'][other]:.2f})."
+            )
+        # Sinon on force le type demandé
+        parsed = filter_energies(parsed, {mode})
+        if not parsed.get("energies"):
+            parsed = ensure_stub(parsed, mode)
+        return parsed, diag
+
+    # mode == "dual"
+    if cg >= conf_min and ce >= conf_min:
+        parsed = filter_energies(parsed, {"gaz", "electricite"})
+        if not parsed.get("energies"):
+            parsed = ensure_stub(parsed, "electricite")
+            parsed = ensure_stub(parsed, "gaz")
+        else:
+            # si un seul présent, complète l’autre en stub
+            parsed = ensure_stub(parsed, "electricite")
+            parsed = ensure_stub(parsed, "gaz")
+        return parsed, diag
+    raise EnergyTypeMismatchError(
+        f"Type demandé: dual. Indices insuffisants dans le PDF "
+        f"(confiance gaz={cg:.2f}, élec={ce:.2f} ; besoin ≥ {conf_min:.2f})."
+    )
+
+
+def _match_any(name: str, patterns) -> bool:
+    nm = _norm(name or "")
+    for p in patterns or []:
+        if _norm(p) and _norm(p) in nm:
+            return True
+    return False
+
+# ───────────────── Catalogue des vices par fournisseur/offre (extraits) ─────────────────
+VICES_DB = {
+    "electricite": {
+        "edf": {
+            "provider_vices": [VC["ELEC_INDEX_OPAQUE"]],
+            "offers": [
+                {"name_patterns": ["Tarif Bleu", "TRV"], "offer_vices": []},
+                {"name_patterns": ["Vert", "Vert Electrique", "Vert Électrique", "Vert Fixe"], "offer_vices": [VC["ELEC_VERT_NON_CERT"]]},
+            ],
+        },
+        "engie": {
+            "provider_vices": [],
+            "offers": [
+                {"name_patterns": ["Elec Reference", "Référence", "Reference 3 ans", "Tranquillite", "Tranquillité"], "offer_vices": [VC["ELEC_TRV_SUP"]]},
+                {"name_patterns": ["Online", "Happ e"], "offer_vices": [VC["ELEC_REMISE_TEMP"]]},
+            ],
+        },
+        "totalenergies": {
+            "provider_vices": [],
+            "offers": [
+                {"name_patterns": ["Online", "Standard Online", "Heures Creuses Online"], "offer_vices": [VC["ELEC_REMISE_TEMP"], VC["ELEC_INDEX_OPAQUE"]]},
+                {"name_patterns": ["Verte", "Verte Fixe"], "offer_vices": [VC["ELEC_VERT_NON_CERT"], VC["ELEC_TRV_SUP"]]},
+            ],
+        },
+        "ohm energie": {
+            "provider_vices": [VC["ELEC_REMISE_TEMP"], VC["ELEC_INDEX_OPAQUE"]],
+            "offers": [
+                {"name_patterns": ["Eco", "Classique", "Petite Conso", "Beaux Jours"], "offer_vices": [VC["ELEC_REMISE_TEMP"], VC["ELEC_INDEX_OPAQUE"]]},
+            ],
+        },
+        "mint": {
+            "provider_vices": [],
+            "offers": [
+                {"name_patterns": ["Online", "Smart"], "offer_vices": [VC["ELEC_REMISE_TEMP"], VC["ELEC_INDEX_OPAQUE"]]},
+                {"name_patterns": ["Vert", "Verte", "100% vert"], "offer_vices": [VC["ELEC_VERT_NON_CERT"], VC["ELEC_TRV_SUP"]]},
+            ],
+        },
+        "ekwateur": {
+            "provider_vices": [],
+            "offers": [
+                {"name_patterns": ["Verte", "Bois", "Hydro", "Eolien", "Éolien"], "offer_vices": [VC["ELEC_VERT_NON_CERT"], VC["ELEC_TRV_SUP"]]},
+                {"name_patterns": ["Indexee", "Indexée"], "offer_vices": [VC["ELEC_INDEX_OPAQUE"]]},
+            ],
+        },
+        "enercoop": {
+            "provider_vices": [],
+            "offers": [
+                {"name_patterns": ["Cooperative", "Coopérative"], "offer_vices": [VC["ELEC_TRV_SUP"]]},
+            ],
+        },
+        "vattenfall": {"provider_vices": [], "offers": [{"name_patterns": ["Eco", "Fixe"], "offer_vices": [VC["ELEC_TRV_SUP"]]}]},
+        "mega": {"provider_vices": [], "offers": [{"name_patterns": ["Super", "Online", "Variable"], "offer_vices": [VC["ELEC_REMISE_TEMP"], VC["ELEC_INDEX_OPAQUE"]]}]},
+        "wekiwi": {"provider_vices": [], "offers": [{"name_patterns": ["Kiwhi", "Online", "Spot"], "offer_vices": [VC["ELEC_INDEX_OPAQUE"]]}]},
+        "octopus": {"provider_vices": [], "offers": [{"name_patterns": ["Agile", "Spot", "Heures Creuses dynamiques"], "offer_vices": [VC["ELEC_INDEX_OPAQUE"]]}]},
+        "plum": {"provider_vices": [], "offers": [{"name_patterns": ["Plum", "Plüm"], "offer_vices": [VC["ELEC_VERT_NON_CERT"]]}]},
+        "ilek": {"provider_vices": [], "offers": [{"name_patterns": ["local", "producteur", "eolien", "hydro", "Éolien"], "offer_vices": [VC["ELEC_VERT_NON_CERT"], VC["ELEC_TRV_SUP"]]}]},
+        "alpiq": {"provider_vices": [], "offers": [{"name_patterns": ["Eco", "Online"], "offer_vices": [VC["ELEC_TRV_SUP"]]}]},
+        "happ e": {"provider_vices": [], "offers": [{"name_patterns": ["Happ e"], "offer_vices": [VC["ELEC_REMISE_TEMP"]]}]},
+    },
+
+    "gaz": {
+        "engie": {
+            "provider_vices": [],
+            "offers": [
+                {"name_patterns": ["Reference", "Référence", "Tranquillite", "Tranquillité", "Fixe"], "offer_vices": [VC["GAZ_SUP_REPERE"]]},
+                {"name_patterns": ["Online", "Happ e"], "offer_vices": [VC["GAZ_PROMO_TROMPEUSE"]]},
+            ],
+        },
+        "edf": {"provider_vices": [], "offers": [{"name_patterns": ["Avantage Gaz", "Fixe"], "offer_vices": [VC["GAZ_SUP_REPERE"]]}]},
+        "totalenergies": {
+            "provider_vices": [],
+            "offers": [
+                {"name_patterns": ["Online", "Standard"], "offer_vices": [VC["GAZ_PROMO_TROMPEUSE"]]},
+                {"name_patterns": ["Verte", "Biogaz"], "offer_vices": [VC["GAZ_SUP_REPERE"]]},
+            ],
+        },
+        "mint": {"provider_vices": [], "offers": [{"name_patterns": ["Biogaz", "Online"], "offer_vices": [VC["GAZ_SUP_REPERE"], VC["GAZ_PROMO_TROMPEUSE"]]}]},
+        "ekwateur": {
+            "provider_vices": [],
+            "offers": [
+                {"name_patterns": ["Biogaz", "Vert"], "offer_vices": [VC["GAZ_SUP_REPERE"]]},
+                {"name_patterns": ["Indexee", "Indexée", "Spot"], "offer_vices": [VC["GAZ_INDEX_SANS_PLAFO"]]},
+            ],
+        },
+        "gaz de bordeaux": {"provider_vices": [], "offers": [{"name_patterns": ["Variable", "Indexee", "Indexée", "Spot"], "offer_vices": [VC["GAZ_INDEX_SANS_PLAFO"]]}]},
+        "wekiwi": {"provider_vices": [], "offers": [{"name_patterns": ["Spot", "Variable", "Kiwhi"], "offer_vices": [VC["GAZ_INDEX_SANS_PLAFO"]]}]},
+        "dyneff": {"provider_vices": [], "offers": [{"name_patterns": ["Fixe", "Confort"], "offer_vices": [VC["GAZ_SUP_REPERE"]]}]},
+        "butagaz": {"provider_vices": [], "offers": [{"name_patterns": ["Online", "Confort"], "offer_vices": [VC["GAZ_PROMO_TROMPEUSE"]]}]},
+        "ohm energie": {"provider_vices": [VC["GAZ_PROMO_TROMPEUSE"], VC["GAZ_INDEX_SANS_PLAFO"]], "offers": [{"name_patterns": ["Eco", "Classique"], "offer_vices": [VC["GAZ_PROMO_TROMPEUSE"], VC["GAZ_INDEX_SANS_PLAFO"]]}]},
+        "ilek": {"provider_vices": [], "offers": [{"name_patterns": ["Biogaz", "Local"], "offer_vices": [VC["GAZ_SUP_REPERE"]]}]},
+        "mega": {"provider_vices": [], "offers": [{"name_patterns": ["Online", "Variable"], "offer_vices": [VC["GAZ_INDEX_SANS_PLAFO"]]}]},
+        "alterna": {"provider_vices": [], "offers": [{"name_patterns": ["Fixe", "Tranquille"], "offer_vices": [VC["GAZ_SUP_REPERE"]]}]},
+        "plenitude": {"provider_vices": [], "offers": [{"name_patterns": ["Fixe", "Indexee", "Indexée"], "offer_vices": [VC["GAZ_SUP_REPERE"], VC["GAZ_INDEX_SANS_PLAFO"]]}]},
+    },
+}
 # ───────────────── Vices cachés (ASCII, no emoji) ─────────────────
-def vices_caches_for(energy: str, fournisseur: Optional[str], offre: Optional[str]) -> List[str]:
-    f = (fournisseur or "").lower()
-    o = (offre or "").lower()
+def vices_caches_for(energy: str, fournisseur: Optional[str], offre: Optional[str], n_items: int = 6) -> list[str]:
+    """
+    Retourne exactement `n_items` vices cachés.
+    - 1) on collecte les vices spécifiques (fournisseur/offre) s'ils existent,
+    - 2) on complète avec le pool générique (6 par type),
+    - 3) on dédoublonne et on tronque/complète à `n_items`.
+    """
+    energy_key = "gaz" if (energy or "").lower().startswith("gaz") else "electricite"
+    prefix = "[ELEC] " if energy_key == "electricite" else "[GAZ] "
 
-    base_elec = [
-        "Tarif supérieur au TRV (à vérifier sur la période de facturation)",
-        "Remise temporaire déguisée (prix d'appel limité dans le temps)",
-        "Option verte non certifiée (labels/garanties d'origine floues)",
-        "Double abonnement (compteur secondaire / services additionnels)",
-        "Indexation non transparente (référence ambiguë, révision discrétionnaire)",
-    ]
-    base_gaz = [
-        "Prix > Prix repère CRE pour profil comparable",
-        "Tarif indexé sans plafond (exposition forte aux hausses)",
-        "Frais techniques (mise en service, déplacement) supérieurs aux barèmes GRDF",
-        "Promotion trompeuse (conditions d’éligibilité restrictives)",
-        "Révision des barèmes en cours d’engagement",
-    ]
+    # 1) spécifiques (fournisseur/offre)
+    specifics: list[str] = []
+    f_norm, o_norm = _norm(fournisseur or ""), _norm(offre or "")
+    provider_db = None
+    db = VICES_DB.get(energy_key, {})
 
-    extra = []
-    if "ohm" in f: extra += ["Variation tarifaire fréquente sur offres indexées (suivi recommandé)"]
-    if "total" in f: extra += ["Éco-participation/verte optionnelle facturée séparément"]
-    if "engie" in f: extra += ["Nom d’offre proche de l’existant mais conditions différentes (fine print)"]
-    if "edf" in f: extra += ["Confusion entre Tarif Bleu (TRV) et offres de marché (prix distincts)"]
-    if "mint" in f or "ekwateur" in f or "ilek" in f: extra += ["Surcoût 'vert premium' possible selon la garantie choisie"]
-    if "octopus" in f: extra += ["Mécanisme de révision indexé marché de gros (sensibilité élevée)"]
-    if "index" in o or "indexée" in o: extra += ["Indexation sur un indice/repère peu documenté dans le contrat"]
-    if "prix bloqué" in o or "fixe" in o or "verte fixe" in o: extra += ["Prix fixe mais hors TRV/Repère (attention en cas de baisse générale)"]
-    if "online" in o: extra += ["Service client majoritairement digital (délais/difficultés hors canal)"]
+    if f_norm:
+        for prov_key, prov_rules in db.items():
+            if _norm(prov_key) in f_norm or f_norm in _norm(prov_key):
+                provider_db = prov_rules
+                break
 
-    lst = (base_elec if energy == "electricite" else base_gaz) + extra
-    prefix = "[ELEC] " if energy == "electricite" else "[GAZ] "  # ASCII labels for reliability
-    return [ s for s in lst]
+    if provider_db:
+        # vices généraux du fournisseur
+        specifics.extend(provider_db.get("provider_vices", []))
+        # vices spécifiques si l'offre matche
+        for rule in provider_db.get("offers", []):
+            if _match_any(offre, rule.get("name_patterns", [])):
+                specifics.extend(rule.get("offer_vices", []))
+
+    # 2) pool générique garanti à 6
+    generic_pool = list(_GENERIC_6.get(energy_key, []))
+
+    # 3) merge: spécifiques d'abord, puis génériques, avec dédoublonnage
+    merged = []
+    seen = set()
+    for src in (specifics + generic_pool):
+        if src not in seen and src:
+            merged.append(prefix + src)
+            seen.add(src)
+
+    # 4) si on a moins que n_items (ça ne devrait pas arriver), on recycle le generic_pool
+    i = 0
+    while len(merged) < n_items and generic_pool:
+        candidate = prefix + generic_pool[i % len(generic_pool)]
+        if candidate not in merged:
+            merged.append(candidate)
+        i += 1
+
+    # 5) tronque à n_items
+    return merged[:n_items]
 
 # ───────────────── Styles & PDF Helpers ─────────────────
 def get_pioui_styles() -> Dict[str, ParagraphStyle]:
@@ -388,7 +833,7 @@ def draw_header_footer(title_right=""):
                 canv.setFont(BOLD_FONT, 12)
                 canv.drawString(2 * cm, height - 32, "Pioui")
 
-        canv.setFillColor(colors.white)
+        canv.setFillColor(colors.black)
         canv.setFont(BASE_FONT, 10)
         canv.drawRightString(width - 2 * cm, height - 28, "Rapport Comparatif Énergie")
         canv.setFont(BASE_FONT, 8)
@@ -397,25 +842,29 @@ def draw_header_footer(title_right=""):
 
         # === Footer ===
         canv.setFillColor(colors.HexColor(PALETTE["dark_navy"]))
-        canv.rect(0, 0, width, 60, stroke=0, fill=1)
+        canv.rect(0, 0, width, 70, stroke=0, fill=1)
         # Yellow thin line above footer content
         canv.setFillColor(colors.HexColor(PALETTE["brand_yellow"]))
-        canv.rect(0, 58, width, 2, stroke=0, fill=1)
+        canv.rect(0, 68, width, 2, stroke=0, fill=1)
 
         # Footer content
-        y_pos = 45
-        canv.setFillColor(colors.white)
+        y_pos = 55
+        canv.setFillColor(colors.HexColor("#1E293B"))
         canv.setFont(BASE_FONT, 8)
         canv.drawString(2 * cm, y_pos, PIOUI["url"])
-        canv.drawCentredString(width / 2, y_pos, PIOUI["addr"])
+        canv.drawCentredString(width / 2, y_pos, PIOUI["name"])
         canv.drawRightString(width - 2 * cm, y_pos, f"Page {doc.page}")
 
         y_pos -= 15
         canv.setFillColor(colors.HexColor(PALETTE["text_muted"]))
         canv.drawString(2 * cm, y_pos, PIOUI["email"])
+        canv.drawCentredString(width / 2, y_pos, PIOUI["addr"])
+
+        y_pos -= 15
+        canv.setFillColor(colors.HexColor(PALETTE["text_muted"]))
         canv.drawCentredString(width / 2, y_pos, PIOUI["tel"])
 
-        y_pos -= 10
+        y_pos -= 8
         canv.setStrokeColor(colors.HexColor(PALETTE["border_light"]))
         canv.line(2 * cm, y_pos, width - 2 * cm, y_pos)
         y_pos -= 12
@@ -467,6 +916,56 @@ def _fmt_euro(x: Optional[float]) -> str:
 def _fmt_kwh(x: Optional[float]) -> str:
     return f"{x:,.0f} kWh".replace(",", " ") if x is not None else "—"
 
+def enforce_single_energy_if_clear(parsed: dict, raw_text: str) -> dict:
+    """
+    If the parser returned both energies but the PDF clearly points to one,
+    drop the other. Rules precedence:
+      1) Strong tokens: PDL => electricité ; PCE => gaz
+      2) If only one token appears, keep that energy.
+      3) If neither/ both appear, use robust keyword scoring.
+    """
+    try:
+        energies = parsed.get("energies") or []
+        if len(energies) <= 1:
+            return parsed
+        if not raw_text:
+            return parsed
+
+        txt = raw_text.lower()
+
+        # Strong tokens
+        has_pdl = "pdl" in txt
+        has_pce = "pce" in txt
+
+        # If exactly one appears, force it
+        if has_pdl and not has_pce:
+            parsed["energies"] = [e for e in energies if (e.get("type") or "").strip().lower().startswith("elect")]
+            return parsed
+        if has_pce and not has_pdl:
+            parsed["energies"] = [e for e in energies if (e.get("type") or "").strip().lower().startswith("gaz")]
+            return parsed
+
+        # Robust scoring if strong tokens are inconclusive
+        score_e = (
+            txt.count("électricité") + txt.count("electricite") +
+            txt.count("elec") + txt.count("compteur") + txt.count("enedis") +
+            3 * txt.count("pdl")
+        )
+        score_g = (
+            txt.count("gaz") + txt.count("grdf") + txt.count("gaz naturel") +
+            3 * txt.count("pce")
+        )
+
+        # Clear margin? keep the dominant one
+        if abs(score_e - score_g) >= 2:
+            keep = "electricite" if score_e > score_g else "gaz"
+            parsed["energies"] = [
+                e for e in energies if (e.get("type") or "").strip().lower().startswith(keep)
+            ]
+        return parsed
+    except Exception:
+        return parsed
+
 # ───────────────── PDF Builder ─────────────────
 def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List[Dict[str, Any]], output_base: str) -> Tuple[str, str]:
     def render(path_out: str, anonymous: bool):
@@ -516,8 +1015,11 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
 
         # — Sections per energy type (ORDER ENFORCED)
         for sec in sections:
+
             params = sec["params"]
             rows = sec["rows"]
+            if not sec["rows"]:
+                continue
             energy_label = "Électricité" if params["energy"] == "electricite" else "Gaz"
 
             # 1) Offre actuelle
@@ -692,7 +1194,12 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
     return non_anon_path, anon_path
 
 # ───────────────── Pipeline ─────────────────
-def process_invoice_file(pdf_path: str, auto_save_suffix_date: bool = True) -> Tuple[str, str]:
+def process_invoice_file(pdf_path: str,
+                         energy_mode: str = "auto",
+                         confidence_min: float = 0.75,
+                         strict: bool = True,
+                         auto_save_suffix_date: bool = True) -> Tuple[str, str]:
+
     pdf_path = os.path.abspath(pdf_path)
     basename = os.path.splitext(os.path.basename(pdf_path))[0]
     out_dir = os.path.dirname(pdf_path)
@@ -738,6 +1245,13 @@ def process_invoice_file(pdf_path: str, auto_save_suffix_date: bool = True) -> T
         if d1 and d2:
             periode["jours"] = (d2 - d1).days
             parsed["periode"] = periode
+    parsed, _diag = apply_energy_mode(
+        parsed,
+        text,
+        mode=energy_mode,  # <— nouveau paramètre
+        conf_min=confidence_min,  # <— nouveau paramètre
+        strict=strict  # <— nouveau paramètre
+    )
 
     energies = parsed.get("energies") or []
     if not energies:
@@ -755,7 +1269,7 @@ def process_invoice_file(pdf_path: str, auto_save_suffix_date: bool = True) -> T
     sections = []
     energy_seen = set()
     for e in energies:
-        params = params_from_energy(parsed, e)
+        params = params_from_energy(parsed, e, text)
         curr = current_annual_total(params)
         offers = []
         if params["energy"] == "electricite":
@@ -767,35 +1281,65 @@ def process_invoice_file(pdf_path: str, auto_save_suffix_date: bool = True) -> T
         energy_seen.add(params["energy"])
 
     combined_dual = []
-    if "electricite" in energy_seen and "gaz" in energy_seen:
-        elec = [s for s in sections if s["params"]["energy"] == "electricite"][0]["rows"]
-        gaz  = [s for s in sections if s["params"]["energy"] == "gaz"][0]["rows"]
-        for i in range(min(3, len(elec), len(gaz))):
-            provider = random.choice([elec[i]["provider"], gaz[i]["provider"]])
-            combined_dual.append({
-                "provider": provider,
-                "offer_name": f"{elec[i]['offer_name']} + {gaz[i]['offer_name']}",
-                "total_annuel_estime": elec[i]["total_annuel_estime"] + gaz[i]["total_annuel_estime"]
-            })
-        combined_dual.sort(key=lambda x: x["total_annuel_estime"])
+    has_elec = any(s["params"]["energy"] == "electricite" for s in sections)
+    has_gaz = any(s["params"]["energy"] == "gaz" for s in sections)
+
+    if has_elec and has_gaz:
+        elec_rows = next(s["rows"] for s in sections if s["params"]["energy"] == "electricite")
+        gaz_rows = next(s["rows"] for s in sections if s["params"]["energy"] == "gaz")
+
+        # Only if we truly have offers on both sides
+        if elec_rows and gaz_rows:
+            for i in range(min(3, len(elec_rows), len(gaz_rows))):
+                provider = random.choice([elec_rows[i]["provider"], gaz_rows[i]["provider"]])
+                combined_dual.append({
+                    "provider": provider,
+                    "offer_name": f"{elec_rows[i]['offer_name']} + {gaz_rows[i]['offer_name']}",
+                    "total_annuel_estime": elec_rows[i]["total_annuel_estime"] + gaz_rows[i]["total_annuel_estime"],
+                })
+            combined_dual.sort(key=lambda x: x["total_annuel_estime"])
 
     return build_pdfs(parsed, sections, combined_dual, base_out)
 
 # ───────────────── CLI ─────────────────
 if __name__ == "__main__":
-    import sys
+    import argparse, sys, os
 
-    if len(sys.argv) < 2:
-        print("\nUsage: python3 report_pioui_static_v3_gemini.py <path_to_invoice.pdf>\n")
-        print("Ensure you have a 'logo' folder with 'pioui_logo.png' and a 'fonts' folder with Poppins .ttf files.")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        prog="report_pioui_static_v3_gemini.py",
+        description="Génère deux rapports (anonyme / non-anonyme) à partir d'une facture d'énergie."
+    )
+    parser.add_argument("invoice_path", help="Chemin vers le PDF de la facture")
+    parser.add_argument("-e", "--energy", default="auto",
+                        help="Type attendu: auto | gaz | electricite | dual (par défaut: auto)")
+    parser.add_argument("-c", "--conf", type=float, default=0.75,
+                        help="Seuil de confiance pour bloquer si contradiction (par défaut: 0.75)")
+    parser.add_argument("--no-strict", action="store_true",
+                        help="Ne pas bloquer en cas de contradiction forte; avertir seulement")
 
-    invoice_path = sys.argv[1]
+    args = parser.parse_args()
+
+    invoice_path = args.invoice_path
     if not os.path.exists(invoice_path):
         print(f"[ERROR] File not found: {invoice_path}")
         sys.exit(1)
 
-    non_anon, anon = process_invoice_file(invoice_path)
-    print("\n🎉 Reports generated successfully!")
-    print(f"   -> {non_anon}")
-    print(f"   -> {anon}")
+    try:
+        non_anon, anon = process_invoice_file(
+            invoice_path,
+            energy_mode=args.energy,
+            confidence_min=max(0.0, min(1.0, args.conf)),
+            strict=(not args.no_strict)
+        )
+        print("\n🎉 Reports generated successfully!")
+        print(f"   -> {non_anon}")
+        print(f"   -> {anon}")
+    except EnergyTypeMismatchError as e:
+        print(f"[ERROR] Type d'énergie incorrect: {e}")
+        sys.exit(2)
+    except EnergyTypeError as e:
+        print(f"[ERROR] Paramètre: {e}")
+        sys.exit(3)
+    except Exception as e:
+        print(f"[ERROR] Unexpected: {e}")
+        sys.exit(99)
