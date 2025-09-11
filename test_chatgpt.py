@@ -16,7 +16,9 @@ Generates 2 stylish PDF reports (non-anonymous & anonymous) from an energy bill.
 import os, json, random, datetime
 from datetime import date, datetime as dt
 from typing import List, Dict, Any, Tuple, Optional
-
+import instructor
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Optional
 # --- OpenAI ---
 from openai import OpenAI
 from config import Config
@@ -57,7 +59,7 @@ PALETTE = {
 PIOUI = {
     "url": "https://pioui.com",
     "email": "service.client@pioui.com",
-    "name":"ND CONSULTING, société à responsabilité limitée, au capital de 100 euros",
+    "name":"ND CONSULTING, société à responsabilité limitée",
     "addr": "Bureau 562-78 avenue des Champs-Élysées, 75008 Paris",
     "tel": "01 62 19 95 72",
     "copyright": f"Copyright © {date.today().year} / 2025, All Rights Reserved."
@@ -65,9 +67,44 @@ PIOUI = {
 
 # Assets
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGO_PATH = os.path.join(SCRIPT_DIR, "logo", "pioui_logo.png")
+LOGO_PATH = os.path.join(SCRIPT_DIR, "logo", "pioui.png")
 FONT_DIR = os.path.join(SCRIPT_DIR, "fonts")
 
+# Définir la structure de sortie avec Pydantic
+class ClientInfo(BaseModel):
+    name: Optional[str] = Field(..., description="Nom complet du client titulaire du contrat.")
+    address: Optional[str] = Field(..., description="Adresse de facturation complète.")
+    zipcode: Optional[str] = Field(..., description="Code postal de l'adresse de facturation.")
+
+class Periode(BaseModel):
+    de: Optional[str] = Field(..., description="Date de début au format JJ/MM/AAAA.")
+    a: Optional[str] = Field(..., description="Date de fin au format JJ/MM/AAAA.")
+    jours: Optional[int] = Field(..., description="Nombre total de jours dans la période.")
+
+class EnergyDetails(BaseModel):
+    type: str = Field(..., description="Le type d'énergie : 'electricite' ou 'gaz'.")
+    periode: Optional[Periode] = Field(..., description="La période de facturation pour la CONSOMMATION réelle de cette énergie, et non la période de l'abonnement.")
+    fournisseur: Optional[str] = Field(..., description="Le nom du fournisseur d'énergie.")
+    offre: Optional[str] = Field(..., description="Le nom commercial de l'offre.")
+    option: Optional[str] = Field(None, description="Pour l'électricité : 'Base' ou 'HP/HC'.")
+    puissance_kVA: Optional[int] = Field(None, description="La puissance souscrite en kVA pour l'électricité.")
+    conso_kwh: Optional[float] = Field(None, description="La consommation totale en kWh pour la période. Peut être null si non trouvée.")
+    total_ttc: Optional[float] = Field(..., description="Le montant total TTC pour cette énergie pour la période.")
+
+    @field_validator("conso_kwh", "total_ttc")
+    def required_field(cls, v):
+        if v is None:
+            # Ce message sera envoyé au LLM en cas d'échec !
+            raise ValueError("Ce champ est manquant. Retrouvez sa valeur dans le document.")
+        return v
+
+
+class Facture(BaseModel):
+    client: ClientInfo
+    periode_globale: Optional[Periode] = Field(..., description="La période de bilan annuel si présente, sinon la période principale.")
+    energies: List[EnergyDetails]
+
+client = instructor.patch(OpenAI(api_key=Config.OPENAI_API_KEY))
 # ───────────────── ✍️ Font Registration (Poppins) ✍️ ─────────────────
 def register_poppins_fonts():
     try:
@@ -221,58 +258,52 @@ def ocr_invoice_with_gpt(image_path: str) -> str:
              "content": [{"type": "image_url", "image_url": {"url": "file://" + os.path.abspath(image_path)}}]},
         ],
         temperature=0.0,
+        seed=42,
         response_format={"type": "json_object"},
     )
     return resp.choices[0].message.content
 
-def parse_text_with_gpt(text: str) -> str:
-    system = "Assistant d'analyse de factures énergie. Retourne UNIQUEMENT un JSON valide (un objet)."
-    user_prompt = f"""
-Analyse cette facture et retourne ce JSON (strict):
-{{
-  "client": {{"name": null, "address": null, "zipcode": null}},
-  "periode": {{"de":"dd/mm/yyyy","a":"dd/mm/yyyy","jours":null}},
-  "energies": [
-    {{
-      "type": "electricite" | "gaz",
-      "fournisseur": null,
-      "offre": null,
-      "option": "Base" | "HP/HC" | null,
-      "puissance_kVA": null,
-      "zone_gaz": null,
-      "class_gaz": null,
-      "conso_kwh": null,
-      "abonnement_ttc": null,
-      "total_ttc": null
-    }}
-  ]
-}}
-Règles:
-- Si la facture contient électricité ET gaz, mets DEUX objets dans "energies".
-- "periode.jours" = diff exacte si possible.
-- "total_ttc" & "abonnement_ttc" sont par énergie.
-- "conso_kwh" peut être null.
+def parse_text_with_gpt(text: str) -> str: # La fonction retournera toujours un str JSON pour la compatibilité
+    """
+    Analyse le texte de la facture en utilisant Instructor et Pydantic pour garantir
+    une sortie JSON structurée et correcte.
+    """
+    try:
+        facture_model = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_model=Facture, # C'est ici que la magie opère
+            max_retries=1,
+            messages=[
+                {"role": "system", "content": "Tu es un expert en extraction de données sur les factures d'énergie. Extrais les informations demandées en te basant sur le schéma Pydantic fourni.  Si un champ est marqué comme obligatoire et que tu ne le trouves pas, cherche plus attentivement."},
+                {"role": "user", "content": f"Voici le texte de la facture à analyser:\n\n---\n{text}\n---"}
+            ],
+            temperature=0.0,
+            seed=42,
+        )
+        # Convertit le modèle Pydantic en dictionnaire puis en string JSON
+        # On renomme 'periode_globale' en 'periode' pour garder la compatibilité avec le reste du code
+        parsed_dict = facture_model.model_dump()
+        parsed_dict['periode'] = parsed_dict.pop('periode_globale', None)
+        return json.dumps(parsed_dict, indent=2)
 
-Texte:
-{text}
-"""
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user_prompt}],
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    return resp.choices[0].message.content
+    except Exception as e:
+        print(f"[ERROR] Instructor/Pydantic parsing failed after retries:: {e}")
+        # Retourne un JSON vide ou une structure de secours
+        return json.dumps({"client": {}, "periode": {}, "energies": []})
 
 # ───────────────── Data processing ─────────────────
 def params_from_energy(global_json: dict, energy_obj: dict, raw_text: str) -> dict:
     zipcode = ((global_json.get("client") or {}).get("zipcode")) or "75001"
-    periode = global_json.get("periode") or {}
+    periode = energy_obj.get("periode") or global_json.get("periode") or {}
     jours = periode.get("jours")
     try:
         jours = int(jours) if jours else None
     except Exception:
         jours = None
+    if not jours and periode.get("de") and periode.get("a"):
+        d1, d2 = _parse_date_fr(periode["de"]), _parse_date_fr(periode["a"])
+        if d1 and d2 and d1 < d2:
+            jours = (d2 - d1).days
 
     energy = (energy_obj.get("type") or "electricite").strip().lower()
     option = energy_obj.get("option") or ("Base" if energy == "electricite" else None)
@@ -309,29 +340,36 @@ def params_from_energy(global_json: dict, energy_obj: dict, raw_text: str) -> di
         "kva": kva if energy == "electricite" else None,
         "option": option if energy == "electricite" else None,
 
-        # ⇩ nouvelles clés explicites
-        "period_kwh": period_kwh,      # conso de la période (pour calcul prix/kWh observé)
-        "annual_kwh": annual_kwh,      # conso annuelle (pour chiffrer les offres)
+        "period_kwh": period_kwh,
+        "annual_kwh": annual_kwh,
+        "consumption_kwh": annual_kwh,  # Keep for backward compatibility in offer generation
 
-        # compat: on laisse 'consumption_kwh' pointer sur l'annuel (plus jamais 0 pour le pricing)
-        "consumption_kwh": annual_kwh,
+        # Add start and end dates for the report
+        "period_start_date": periode.get("de"),
+        "period_end_date": periode.get("a"),
+        "period_days": jours,
 
         "hp_share": 0.35 if (option and str(option).upper().startswith("HP")) else None,
-        "period_days": jours,
         "total_ttc_period": _to_float(energy_obj.get("total_ttc")),
         "abonnement_ttc_period": _to_float(energy_obj.get("abonnement_ttc")),
         "fournisseur": energy_obj.get("fournisseur"),
         "offre": energy_obj.get("offre"),
     }
 
+
+# Corrected function
 def current_annual_total(params: dict) -> Optional[float]:
     tp, pd = params.get("total_ttc_period"), params.get("period_days")
     if tp and pd:
         return annualize(tp, pd)
-    # fallback rough estimate
-    return (params["consumption_kwh"] * (0.25 if params["energy"] == "electricite" else 0.10)
-            + (150.0 if params["energy"] == "electricite" else 220.0))
 
+    # fallback rough estimate
+    conso_kwh = params.get("consumption_kwh")  # Use .get() for safety
+    if conso_kwh is not None:
+        return (conso_kwh * (0.25 if params["energy"] == "electricite" else 0.10)
+                + (150.0 if params["energy"] == "electricite" else 220.0))
+
+    return None  # Return None if no consumption data is available to calculate
 # ───────────────── Synthetic offers (logic unchanged) ─────────────────
 PROVIDERS_ELEC = ["EDF", "Engie", "TotalEnergies", "Vattenfall", "OHM Énergie", "ekWateur", "Mint Énergie",
                   "Plüm énergie", "ilek", "Enercoop", "Méga Énergie", "Wekiwi", "Happ-e by Engie", "Alpiq",
@@ -556,7 +594,7 @@ def ensure_stub(parsed: dict, energy: str) -> dict:
 
 def apply_energy_mode(parsed: dict, raw_text: str,
                       mode: str = "auto",
-                      conf_min: float = 0.75,
+                      conf_min: float = 0.5,
                       strict: bool = True) -> tuple[dict, dict]:
     """
     Applique le mode d'énergie demandé:
@@ -826,7 +864,7 @@ def draw_header_footer(title_right=""):
 
         if LOGO_PATH and os.path.exists(LOGO_PATH):
             try:
-                logo = RLImage(LOGO_PATH, width=90, height=30)
+                logo = RLImage(LOGO_PATH, width=95, height=35)
                 logo.drawOn(canv, 2 * cm, height - 40)
             except Exception:
                 canv.setFillColor(colors.white)
@@ -992,15 +1030,40 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
         client = parsed.get("client") or {}
         right_title = "Rapport Anonyme" if anonymous else (client.get("name") or "")
         on_page = draw_header_footer(title_right=right_title)
-
+        #
+        # provider_map = {}
+        # if anonymous:
+        #     # 1. Identifier le fournisseur actuel pour l'exclure de la carte d'anonymisation
+        #     current_provider = None
+        #     if sections and sections[0]["params"]:
+        #         current_provider = sections[0]["params"].get("fournisseur")
+        #
+        #     # 2. Collecter et mapper UNIQUEMENT les fournisseurs alternatifs
+        #     alt_providers = set()
+        #     for sec in sections:
+        #         for row in sec["rows"]:
+        #             if row["provider"] != current_provider:  # On ne traite que les fournisseurs différents
+        #                 alt_providers.add(row["provider"])
+        #     if combined_dual:
+        #         for row in combined_dual:
+        #             if row["provider"] != current_provider:
+        #                 alt_providers.add(row["provider"])
+        #
+        #     sorted_alt_providers = sorted(list(alt_providers))
+        #     for i, provider in enumerate(sorted_alt_providers):
+        #         provider_map[provider] = f"Fournisseur Alternatif {chr(65 + i)}"  # A, B, C...
+        #
+        # def anonymize_provider(name: str) -> str:
+        #     """Si le nom est dans la carte, retourne l'alias, sinon retourne le nom original."""
+        #     if anonymous and name in provider_map:
+        #         return provider_map[name]
+        #     return name or "—"
         # — Intro
         story.append(H1("Votre Rapport Comparatif"))
-        if anonymous:
-            story.append(P("<b>Client :</b> — (anonyme)"))
-        else:
-            story.append(P(f"<b>Client :</b> {client.get('name') or '—'}"))
-            if client.get("address"):
-                story.append(PM(client["address"]))
+
+        story.append(P(f"<b>Client :</b> {client.get('name') or '—'}"))
+        if client.get("address"):
+            story.append(PM(client["address"]))
         story.append(Paragraph(f"<i>Généré le {date.today().strftime('%d/%m/%Y')}</i>", s["ItalicMuted"]))
         story.append(Spacer(1, 10))
         story.append(HRFlowable(width="100%", color=colors.HexColor(PALETTE["border_light"]), thickness=1))
@@ -1009,13 +1072,13 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
         # — Période
         periode = parsed.get("periode") or {}
         p_de, p_a, p_j = periode.get("de"), periode.get("a"), periode.get("jours")
-        story.append(H2("Période de facturation analysée"))
-        story.append(P(f"Du <b>{p_de or 'N/A'}</b> au <b>{p_a or 'N/A'}</b> (soit {p_j or '~'} jours)"))
-        story.append(Spacer(1, 12))
+        if p_de and p_a:
+            story.append(H2("Période de facturation analysée"))
+            story.append(P(f"Du <b>{p_de}</b> au <b>{p_a}</b> (soit {p_j or '~'} jours)"))
+            story.append(Spacer(1, 12))
 
-        # — Sections per energy type (ORDER ENFORCED)
+        # — Sections per energy type
         for sec in sections:
-
             params = sec["params"]
             rows = sec["rows"]
             if not sec["rows"]:
@@ -1026,163 +1089,167 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
             story.append(H1(f"Analyse {energy_label}"))
             story.append(H2("Votre offre actuelle"))
 
-            conso = params.get("consumption_kwh")
+            p_de_sec = params.get("period_start_date")
+            p_a_sec = params.get("period_end_date")
+            p_j_sec = params.get("period_days")
+            if p_de_sec and p_a_sec and p_j_sec:
+                story.append(
+                    P(f"<i>Période analysée : Du <b>{p_de_sec}</b> au <b>{p_a_sec}</b> (soit {p_j_sec} jours)</i>"))
+                story.append(Spacer(1, 6))
+
+            conso_period = params.get("period_kwh")
             total_period = params.get("total_ttc_period")
-            avg_price = (total_period / conso) if (total_period and conso) else None
+            avg_price = (total_period / conso_period) if (total_period and conso_period) else None
             annual_now = current_annual_total(params)
 
-            head = [
-                P("Fournisseur"), P("Offre"), P("Puissance"), P("Option"),
-                P("Conso. (fact.)"), PR("Total TTC (période)"), PR("Prix moyen (€/kWh)"),
-                PR("Estimation annuelle actuelle")  # NEW column
-            ]
-            row = [
-                P(f"<b>{params.get('fournisseur') or '—'}</b>"),
-                P(params.get('offre') or '—'),
-                P(str(params.get('kva')) if params["energy"] == "electricite" else "N/A"),
-                P(params.get('option') if params["energy"] == "electricite" else "N/A"),
-                P(_fmt_kwh(conso)),
-                PR(_fmt_euro(total_period)),
-                PR(f"{avg_price:.4f} €/kWh" if avg_price else "—"),
-                PR(_fmt_euro(annual_now))  # NEW value
-            ]
-            story.append(create_modern_table([head, row], cw(1.3, 1.8, 0.9, 0.9, 1.2, 1.2, 1.2, 1.6),
-                                             numeric_cols={4, 5, 6, 7}, zebra=False))
+            head = [P("Fournisseur"), P("Offre"), P("Puissance"), P("Option"), P("Conso. (période)"),
+                    PR("Total TTC (période)"), PR("Prix moyen (€/kWh)"), PR("Estimation annuelle actuelle")]
+            row = [P(f"<b>{params.get('fournisseur') or '—'}</b>"), P(params.get('offre') or '—'),
+                   P(str(params.get('kva')) if params["energy"] == "electricite" else "N/A"),
+                   P(params.get('option') if params["energy"] == "electricite" else "N/A"), P(_fmt_kwh(conso_period)),
+                   PR(_fmt_euro(total_period)), PR(f"{avg_price:.4f} €/kWh" if avg_price else "—"),
+                   PR(_fmt_euro(annual_now))]
+            story.append(
+                create_modern_table([head, row], cw(1.3, 1.8, 0.9, 0.9, 1.2, 1.2, 1.2, 1.6), numeric_cols={4, 5, 6, 7},
+                                    zebra=False))
             story.append(Spacer(1, 12))
 
             # 2) Comparatif
             story.append(H2(f"Comparatif des offres {energy_label}"))
+            if anonymous:
+                # Créer des maps locales pour chaque type d'offre, basées sur leur ordre d'apparition
+                base_offers = [o for o in rows if o.get("option") in (None, "Base")]
+                hphc_offers = [o for o in rows if o.get("option") == "HP/HC"]
+                base_map = {o['provider']: f"Fournisseur Alternatif {chr(65 + i)}" for i, o in
+                            enumerate(base_offers[:3])}
+                hphc_map = {o['provider']: f"Fournisseur Alternatif {chr(65 + i)}" for i, o in
+                            enumerate(hphc_offers[:3])}
+
+            def get_anon_name(provider_name, offer_option):
+                if not anonymous: return provider_name or "—"
+                # Choisit la bonne map (base ou hphc) en fonction de l'option de l'offre
+                current_map = hphc_map if offer_option == "HP/HC" else base_map
+                return current_map.get(provider_name, provider_name or "—")
+
             if params["energy"] == "electricite":
                 base = [o for o in rows if o.get("option") in (None, "Base")]
                 hphc = [o for o in rows if o.get("option") == "HP/HC"]
 
-                thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"), PR("Total estimé / an")]
                 def map_b(o):
-                    return [
-                        P(o["provider"]), P(o["offer_name"]),
-                        PR(f"{o['price_kwh_ttc']:.4f} €/kWh"),
-                        PR(_fmt_euro(o["abonnement_annuel_ttc"])),
-                        PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")
-                    ]
+                    return [P(get_anon_name(o["provider"], "Base")), P(o["offer_name"]),
+                            PR(f"{o['price_kwh_ttc']:.4f} €/kWh"), PR(_fmt_euro(o["abonnement_annuel_ttc"])),
+                            PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
 
                 if base:
                     story.append(P("<b> Option Base</b>"))
-                    story.append(create_modern_table([thead] + [map_b(o) for o in base[:3]],
-                                                     cw(1.2, 2.0, 1.0, 1.2, 1.2), numeric_cols={2,3,4}))
+                    thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"),
+                             PR("Total estimé / an")]
+                    story.append(
+                        create_modern_table([thead] + [map_b(o) for o in base[:3]], cw(1.2, 2.0, 1.0, 1.2, 1.2),
+                                            numeric_cols={2, 3, 4}))
                     story.append(Spacer(1, 6))
+
+                def map_h(o):
+                    return [P(get_anon_name(o["provider"], "HP/HC")), P(o["offer_name"]),
+                            PR(f"{o['price_hp_ttc']:.4f} / {o['price_hc_ttc']:.4f} €/kWh"),
+                            PR(_fmt_euro(o["abonnement_annuel_ttc"])),
+                            PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
 
                 if hphc:
                     story.append(P("<b> Option Heures Pleines / Heures Creuses</b>"))
-                    thead2 = [P("Fournisseur"), P("Offre"), PR("Prix HP / HC"), PR("Abonnement / an"), PR("Total estimé / an")]
-                    def map_h(o):
-                        return [
-                            P(o["provider"]), P(o["offer_name"]),
-                            PR(f"{o['price_hp_ttc']:.4f} / {o['price_hc_ttc']:.4f} €/kWh"),
-                            PR(_fmt_euro(o["abonnement_annuel_ttc"])),
-                            PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")
-                        ]
-                    story.append(create_modern_table([thead2] + [map_h(o) for o in hphc[:3]],
-                                                     cw(1.2, 1.8, 1.4, 1.2, 1.2), numeric_cols={2,3,4}))
+                    thead2 = [P("Fournisseur"), P("Offre"), PR("Prix HP / HC"), PR("Abonnement / an"),
+                              PR("Total estimé / an")]
+                    story.append(
+                        create_modern_table([thead2] + [map_h(o) for o in hphc[:3]], cw(1.2, 1.8, 1.4, 1.2, 1.2),
+                                            numeric_cols={2, 3, 4}))
                     story.append(Spacer(1, 8))
-            else:
-                thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"), PR("Total estimé / an")]
+            else:  # Gaz
                 def map_g(o):
-                    return [
-                        P(o["provider"]), P(o["offer_name"]),
-                        PR(f"{o['price_kwh_ttc']:.4f} €/kWh"),
-                        PR(_fmt_euro(o["abonnement_annuel_ttc"])),
-                        PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")
-                    ]
-                story.append(create_modern_table([thead] + [map_g(o) for o in rows[:3]],
-                                                 cw(1.2, 2.0, 1.0, 1.2, 1.2), numeric_cols={2,3,4}))
+                    return [P(get_anon_name(o["provider"], "Base")), P(o["offer_name"]),
+                            PR(f"{o['price_kwh_ttc']:.4f} €/kWh"), PR(_fmt_euro(o["abonnement_annuel_ttc"])),
+                            PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
+
+                thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"),
+                         PR("Total estimé / an")]
+                story.append(create_modern_table([thead] + [map_g(o) for o in rows[:3]], cw(1.2, 2.0, 1.0, 1.2, 1.2),
+                                                 numeric_cols={2, 3, 4}))
                 story.append(Spacer(1, 8))
 
-            # 3) Vices cachés (Points de vigilance)
+            # 3) Vices cachés ...
             story.append(H2("Points de vigilance (Vices cachés)"))
             story.append(PM("Analyse sur l’offre actuelle et les alternatives proposées."))
             story.append(Spacer(1, 4))
             bullets = vices_caches_for(params["energy"], params.get("fournisseur"), params.get("offre"))
-
-            # Add 1–2 extra points based on best alternative (for nuance)
-            best_for_notes = next((o for o in rows if o.get("total_annuel_estime") is not None), None)
-            if best_for_notes:
-                bullets += vices_caches_for(params["energy"], best_for_notes.get("provider"), best_for_notes.get("offer_name"))[:2]
-
-            # Render as bullet list (ASCII safe)
-            for b in dict.fromkeys(bullets):  # preserve order, avoid duplicates
+            for b in bullets:
                 story.append(Paragraph(f"• {b}", s["Body"]))
             story.append(Spacer(1, 10))
 
-            # Yellow badge separator
             badge = Table([[Paragraph("Attention aux clauses et indexations", s["Badge"])]], colWidths=[W])
-            badge.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,-1), colors.HexColor(PALETTE["brand_yellow"])),
-                ('LEFTPADDING', (0,0), (-1,-1), 8),
-                ('RIGHTPADDING', (0,0), (-1,-1), 8),
-                ('TOPPADDING', (0,0), (-1,-1), 4),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-            ]))
+            badge.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, -1), colors.HexColor(PALETTE["brand_yellow"])),
+                                       ('LEFTPADDING', (0, 0), (-1, -1), 8), ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                                       ('TOPPADDING', (0, 0), (-1, -1), 4), ('BOTTOMPADDING', (0, 0), (-1, -1), 4)]))
             story.append(badge)
             story.append(Spacer(1, 12))
 
             # 4) Notre recommandation
             story.append(H2("Notre recommandation"))
-            best = next((o for o in rows if o.get("total_annuel_estime") is not None), None)
+            best = min(rows, key=lambda x: x["total_annuel_estime"]) if rows else None
             curr = annual_now
-            if best and curr:
-                best = min([o for o in rows if o.get("total_annuel_estime") is not None], key=lambda x: x["total_annuel_estime"])
+            if best and curr and best.get("total_annuel_estime"):
                 delta = curr - best["total_annuel_estime"]
                 if delta > 0:
+                    # ✅ MODIFIÉ : La recommandation utilise la même logique pour trouver le nom anonymisé correct
+                    reco_provider_name = get_anon_name(best['provider'], best.get('option'))
                     reco_text = Paragraph(
                         f"Économisez jusqu'à <font size='14' color='{PALETTE['saving_red']}'><b>{_fmt_euro(delta)}</b></font> "
-                        f"par an en passant chez <b>{best['provider']}</b> avec l'offre <b>{best['offer_name']}</b>.",
-                        s["Body"]
+                        f"par an en passant chez <b>{reco_provider_name}</b> avec l'offre <b>{best['offer_name']}</b>."
+                        f" Pour approfondir cette recommandation et obtenir un conseil personnalisé, "
+                        f"nos experts sont joignables au <b>{PIOUI['tel']}</b>.", s["Body"]
                     )
                 else:
-                    reco_text = Paragraph(
-                        "Votre offre actuelle semble compétitive. Aucune économie nette identifiée.",
-                        s["Body"]
-                    )
+                    reco_text = Paragraph("Votre offre actuelle semble compétitive. Aucune économie nette identifiée.",
+                                          s["Body"])
             else:
                 reco_text = Paragraph("Données insuffisantes pour une recommandation chiffrée fiable.", s["Body"])
 
             reco_box = Table([[reco_text]], colWidths=[W])
-            reco_box.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor(PALETTE["bg_light"])),
-                ('BOX', (0, 0), (-1, -1), 1, colors.HexColor(PALETTE["border_light"])),
-                ('LEFTPADDING', (0, 0), (-1, -1), 12),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-                ('TOPPADDING', (0, 0), (-1, -1), 12),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-            ]))
+            reco_box.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, -1), colors.HexColor(PALETTE["bg_light"])),
+                                          ('BOX', (0, 0), (-1, -1), 1, colors.HexColor(PALETTE["border_light"])),
+                                          ('LEFTPADDING', (0, 0), (-1, -1), 12), ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+                                          ('TOPPADDING', (0, 0), (-1, -1), 12),
+                                          ('BOTTOMPADDING', (0, 0), (-1, -1), 12)]))
             story.append(reco_box)
             story.append(Spacer(1, 12))
-
             story.append(HRFlowable(width="100%", color=colors.HexColor(PALETTE["border_light"]), thickness=1))
             story.append(Spacer(1, 12))
 
         # Pack Dual (optional)
         if combined_dual:
-            story.append(H1("Pack Dual (Électricité + Gaz)"))
-            thead = [P("Fournisseur"), P("Offres combinées"), PR("Total estimé (élec+gaz)")]
-            def map_d(o):
-                return [P(o["provider"]), P(o["offer_name"]), PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
-            story.append(create_modern_table([thead] + [map_d(o) for o in combined_dual[:3]],
-                                             cw(1.3, 3.0, 1.2), numeric_cols={2}))
-            story.append(Spacer(1, 10))
+            # ✅ MODIFIÉ : Création d'une map locale pour le pack dual
+            dual_map = {}
+            if anonymous:
+                dual_map = {o['provider']: f"Fournisseur Alternatif {chr(65 + i)}" for i, o in
+                            enumerate(combined_dual[:3])}
 
-        # 5) Méthodologie & Fiabilité des données (global, at the end)
+            story.append(H1("Pack Dual (Électricité + Gaz)"))
+
+            def map_d(o):
+                provider_name = dual_map.get(o["provider"], o["provider"]) if anonymous else o["provider"]
+                return [P(provider_name), P(o["offer_name"]), PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
+
+            thead = [P("Fournisseur"), P("Offres combinées"), PR("Total estimé (élec+gaz)")]
+            story.append(create_modern_table([thead] + [map_d(o) for o in combined_dual[:3]], cw(1.3, 3.0, 1.2),
+                                             numeric_cols={2}))
+            story.append(Spacer(1, 10))
+        # 5) Méthodologie
         story.append(H2("Méthodologie & Fiabilité des données"))
         story.append(Paragraph(
-            "Les données de ce rapport proviennent de votre facture, d’offres publiques de référence, et de barèmes officiels. "
-            "Les comparaisons sont estimées à partir d’hypothèses réalistes pour illustrer des économies potentielles.",
-            s["Muted"]
-        ))
+            "Les données de ce rapport proviennent de votre facture, d’offres publiques de référence, et de barèmes officiels. Les comparaisons sont estimées à partir d’hypothèses réalistes pour illustrer des économies potentielles.",
+            s["Muted"]))
         story.append(Spacer(1, 6))
         story.append(Paragraph(
             "<b>Rapport indépendant</b>, sans publicité ni affiliation. Son seul but : identifier vos économies possibles.",
-            s["Muted"]
-        ))
+            s["Muted"]))
 
         doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
         print(f"✅ PDF report created: {path_out}")
@@ -1196,7 +1263,7 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
 # ───────────────── Pipeline ─────────────────
 def process_invoice_file(pdf_path: str,
                          energy_mode: str = "auto",
-                         confidence_min: float = 0.75,
+                         confidence_min: float = 0.5,
                          strict: bool = True,
                          auto_save_suffix_date: bool = True) -> Tuple[str, str]:
 
@@ -1312,8 +1379,8 @@ if __name__ == "__main__":
     parser.add_argument("invoice_path", help="Chemin vers le PDF de la facture")
     parser.add_argument("-e", "--energy", default="auto",
                         help="Type attendu: auto | gaz | electricite | dual (par défaut: auto)")
-    parser.add_argument("-c", "--conf", type=float, default=0.75,
-                        help="Seuil de confiance pour bloquer si contradiction (par défaut: 0.75)")
+    parser.add_argument("-c", "--conf", type=float, default=0.5,
+                        help="Seuil de confiance pour bloquer si contradiction (par défaut: 0.5)")
     parser.add_argument("--no-strict", action="store_true",
                         help="Ne pas bloquer en cas de contradiction forte; avertir seulement")
 
