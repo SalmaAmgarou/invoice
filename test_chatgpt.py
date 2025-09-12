@@ -12,7 +12,7 @@ Generates 2 stylish PDF reports (non-anonymous & anonymous) from an energy bill.
 - ORDER per energy: Offre actuelle -> Comparatif -> Vices cachés -> Recommandation -> (global) Méthodologie & Fiabilité
 - Uses Pioui yellow #F0BC00 and replaces emojis with ASCII labels for reliability
 """
-
+import base64, mimetypes
 import os, json, random, datetime
 from datetime import date, datetime as dt
 from typing import List, Dict, Any, Tuple, Optional
@@ -1028,37 +1028,9 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
         PM = lambda x: Paragraph(x if isinstance(x, str) else "—", s["Muted"])
 
         client = parsed.get("client") or {}
-        right_title = "Rapport Anonyme" if anonymous else (client.get("name") or "")
+        right_title = client.get("name") or ""
         on_page = draw_header_footer(title_right=right_title)
-        #
-        # provider_map = {}
-        # if anonymous:
-        #     # 1. Identifier le fournisseur actuel pour l'exclure de la carte d'anonymisation
-        #     current_provider = None
-        #     if sections and sections[0]["params"]:
-        #         current_provider = sections[0]["params"].get("fournisseur")
-        #
-        #     # 2. Collecter et mapper UNIQUEMENT les fournisseurs alternatifs
-        #     alt_providers = set()
-        #     for sec in sections:
-        #         for row in sec["rows"]:
-        #             if row["provider"] != current_provider:  # On ne traite que les fournisseurs différents
-        #                 alt_providers.add(row["provider"])
-        #     if combined_dual:
-        #         for row in combined_dual:
-        #             if row["provider"] != current_provider:
-        #                 alt_providers.add(row["provider"])
-        #
-        #     sorted_alt_providers = sorted(list(alt_providers))
-        #     for i, provider in enumerate(sorted_alt_providers):
-        #         provider_map[provider] = f"Fournisseur Alternatif {chr(65 + i)}"  # A, B, C...
-        #
-        # def anonymize_provider(name: str) -> str:
-        #     """Si le nom est dans la carte, retourne l'alias, sinon retourne le nom original."""
-        #     if anonymous and name in provider_map:
-        #         return provider_map[name]
-        #     return name or "—"
-        # — Intro
+
         story.append(H1("Votre Rapport Comparatif"))
 
         story.append(P(f"<b>Client :</b> {client.get('name') or '—'}"))
@@ -1105,8 +1077,8 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
             head = [P("Fournisseur"), P("Offre"), P("Puissance"), P("Option"), P("Conso. (période)"),
                     PR("Total TTC (période)"), PR("Prix moyen (€/kWh)"), PR("Estimation annuelle actuelle")]
             row = [P(f"<b>{params.get('fournisseur') or '—'}</b>"), P(params.get('offre') or '—'),
-                   P(str(params.get('kva')) if params["energy"] == "electricite" else "N/A"),
-                   P(params.get('option') if params["energy"] == "electricite" else "N/A"), P(_fmt_kwh(conso_period)),
+                   P(str(params.get('kva')) if params["energy"] == "electricite" else "—"),
+                   P(params.get('option') if params["energy"] == "electricite" else "—"), P(_fmt_kwh(conso_period)),
                    PR(_fmt_euro(total_period)), PR(f"{avg_price:.4f} €/kWh" if avg_price else "—"),
                    PR(_fmt_euro(annual_now))]
             story.append(
