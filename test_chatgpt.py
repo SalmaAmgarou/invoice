@@ -12,7 +12,7 @@ Generates 2 stylish PDF reports (non-anonymous & anonymous) from an energy bill.
 - ORDER per energy: Offre actuelle -> Comparatif -> Vices cachés -> Recommandation -> (global) Méthodologie & Fiabilité
 - Uses Pioui yellow #F0BC00 and replaces emojis with ASCII labels for reliability
 """
-import base64, mimetypes
+import base64, mimetypes, pathlib
 import os, json, random, datetime
 from datetime import date, datetime as dt
 from typing import List, Dict, Any, Tuple, Optional
@@ -41,6 +41,9 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfgen import canvas as rl_canvas
+from openai import OpenAI
+import instructor
+from config import Config
 
 # ───────────────── 🎨 Pioui Branding & Styling 🎨 ─────────────────
 PALETTE = {
@@ -70,7 +73,15 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(SCRIPT_DIR, "logo", "pioui.png")
 FONT_DIR = os.path.join(SCRIPT_DIR, "fonts")
 
-# Définir la structure de sortie avec Pydantic
+
+
+def _image_to_data_url(path: str) -> str:
+    mime = mimetypes.guess_type(path)[0] or "image/png"
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    return f"data:%s;base64,%s" % (mime, b64)
+
+# DÃ©finir la structure de sortie avec Pydantic
 class ClientInfo(BaseModel):
     name: Optional[str] = Field(..., description="Nom complet du client titulaire du contrat.")
     address: Optional[str] = Field(..., description="Adresse de facturation complète.")
@@ -254,8 +265,15 @@ def ocr_invoice_with_gpt(image_path: str) -> str:
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user_prompt},
-            {"role": "user",
-             "content": [{"type": "image_url", "image_url": {"url": "file://" + os.path.abspath(image_path)}}]},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_to_data_url(image_path)}
+                    }
+                ],
+            },
         ],
         temperature=0.0,
         seed=42,
@@ -1232,7 +1250,7 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
     render(anon_path, anonymous=True)
     return non_anon_path, anon_path
 
-# ───────────────── Pipeline ─────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def process_invoice_file(pdf_path: str,
                          energy_mode: str = "auto",
                          confidence_min: float = 0.5,
@@ -1255,18 +1273,31 @@ def process_invoice_file(pdf_path: str,
         except Exception:
             print("[WARN] JSON parsing failed. Falling back to OCR...")
     if not parsed:
-        print("[INFO] PDF is image-based or text parsing failed. Using OCR via GPT-4o (page 1)...")
+        print("[INFO] PDF is image-based or text parsing failed. Using OCR via GPT-4o (all pages)...")
         try:
             pages = convert_from_path(pdf_path, dpi=200)
             if not pages:
                 raise ValueError("No pages converted from PDF.")
-            tmp_img = os.path.join(out_dir, f"{basename}_page1_temp.png")
-            pages[0].save(tmp_img, "PNG")
-            raw = ocr_invoice_with_gpt(tmp_img)
-            os.remove(tmp_img)
+
+            # Process ALL pages, not just page 1
+            all_ocr_text = []
+            for i, page in enumerate(pages):
+                tmp_img = os.path.join(out_dir, f"{basename}_page{i + 1}_temp.png")
+                page.save(tmp_img, "PNG")
+
+                # OCR each page
+                page_text = ocr_invoice_with_gpt(tmp_img)
+                all_ocr_text.append(f"=== PAGE {i + 1} ===\n{page_text}")
+                os.remove(tmp_img)
+
+            # Combine all pages and parse
+            combined_ocr = "\n\n".join(all_ocr_text)
+            raw = parse_text_with_gpt(combined_ocr)  # Use text parser, not OCR parser
             parsed = json.loads(raw)
+
         except Exception as e:
             print(f"[ERROR] OCR and parsing failed: {e}. Using fallback data.")
+
             parsed = {
                 "client": {"name": None, "address": None, "zipcode": "75001"},
                 "periode": {"de": None, "a": None, "jours": None},
@@ -1287,9 +1318,9 @@ def process_invoice_file(pdf_path: str,
     parsed, _diag = apply_energy_mode(
         parsed,
         text,
-        mode=energy_mode,  # <— nouveau paramètre
-        conf_min=confidence_min,  # <— nouveau paramètre
-        strict=strict  # <— nouveau paramètre
+        mode=energy_mode,  # <â€” nouveau paramÃ¨tre
+        conf_min=confidence_min,  # <â€” nouveau paramÃ¨tre
+        strict=strict  # <â€” nouveau paramÃ¨tre
     )
 
     energies = parsed.get("energies") or []
@@ -1340,15 +1371,206 @@ def process_invoice_file(pdf_path: str,
 
     return build_pdfs(parsed, sections, combined_dual, base_out)
 
-# ───────────────── CLI ─────────────────
+
+def process_image_files(image_paths: List[str],
+                        energy_mode: str = "auto",
+                        confidence_min: float = 0.5,
+                        strict: bool = True,
+                        auto_save_suffix_date: bool = True) -> Tuple[str, str]:
+    """
+    Process multiple image files (invoice pages) directly
+
+    Args:
+        image_paths: List of paths to image files (jpg, png, etc.)
+        energy_mode: Energy type detection mode ("auto", "gaz", "electricite", "dual")
+        confidence_min: Minimum confidence threshold for energy type detection
+        strict: Whether to raise errors on energy type mismatches
+        auto_save_suffix_date: Whether to add timestamp to output filenames
+
+    Returns:
+        Tuple of (non_anonymous_pdf_path, anonymous_pdf_path)
+    """
+
+    if not image_paths:
+        raise ValueError("No image paths provided")
+
+    # Validate that all paths exist and are image files
+    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+    for img_path in image_paths:
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(f"Image file not found: {img_path}")
+
+        ext = os.path.splitext(img_path)[1].lower()
+        if ext not in image_extensions:
+            raise ValueError(f"Unsupported image format: {ext}")
+
+    # Use first image's directory and name for output
+    first_image = os.path.abspath(image_paths[0])
+    basename = os.path.splitext(os.path.basename(first_image))[0]
+    out_dir = os.path.dirname(first_image)
+
+    # Generate output filename with optional timestamp
+    suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") if auto_save_suffix_date else ""
+    base_out = os.path.join(out_dir, f"{basename}{('_' + suffix) if suffix else ''}")
+
+    print(f"[INFO] Processing {len(image_paths)} image files with OCR...")
+
+    # OCR all images
+    all_ocr_results = []
+    combined_raw_text = ""
+
+    for i, img_path in enumerate(image_paths):
+        try:
+            print(f"[INFO] Processing image {i + 1}/{len(image_paths)}: {os.path.basename(img_path)}")
+
+            # OCR this page
+            page_ocr_result = ocr_invoice_with_gpt(img_path)
+
+            if page_ocr_result and page_ocr_result.strip():
+                all_ocr_results.append(f"=== PAGE {i + 1} ({os.path.basename(img_path)}) ===\n{page_ocr_result}")
+                # Also build a combined text for energy detection
+                combined_raw_text += f"\n{page_ocr_result}\n"
+            else:
+                print(f"[WARN] No OCR result for {img_path}")
+
+        except Exception as e:
+            print(f"[WARN] Failed to OCR {img_path}: {e}")
+            continue
+
+    if not all_ocr_results:
+        raise ValueError("No images could be processed successfully - all OCR attempts failed")
+
+    print(f"[INFO] Successfully OCR'd {len(all_ocr_results)} pages")
+
+    # Combine all OCR results for parsing
+    combined_ocr_text = "\n\n".join(all_ocr_results)
+
+    # Parse the combined OCR text using the text parser (not OCR parser)
+    parsed = None
+    try:
+        print("[INFO] Parsing combined OCR results...")
+        raw_json = parse_text_with_gpt(combined_ocr_text)
+        parsed = json.loads(raw_json)
+        print("[INFO] Successfully parsed invoice data from images")
+
+    except Exception as e:
+        print(f"[ERROR] Parsing failed: {e}. Using fallback data.")
+        parsed = {
+            "client": {"name": None, "address": None, "zipcode": "75001"},
+            "periode": {"de": None, "a": None, "jours": None},
+            "energies": [{
+                "type": "electricite", "fournisseur": None, "offre": None,
+                "option": "Base", "puissance_kVA": 6, "conso_kwh": 3500,
+                "abonnement_ttc": None, "total_ttc": None
+            }]
+        }
+
+    # Fill "jours" if missing and dates present
+    periode = parsed.get("periode") or {}
+    if not periode.get("jours") and periode.get("de") and periode.get("a"):
+        d1, d2 = _parse_date_fr(periode["de"]), _parse_date_fr(periode["a"])
+        if d1 and d2:
+            periode["jours"] = (d2 - d1).days
+            parsed["periode"] = periode
+
+    # Apply energy mode filtering and detection
+    try:
+        parsed, _diag = apply_energy_mode(
+            parsed,
+            combined_raw_text,  # Use the raw text for energy detection
+            mode=energy_mode,
+            conf_min=confidence_min,
+            strict=strict
+        )
+        print(f"[INFO] Energy mode '{energy_mode}' applied successfully")
+
+    except EnergyTypeMismatchError as e:
+        print(f"[ERROR] Energy type mismatch: {e}")
+        raise
+    except EnergyTypeError as e:
+        print(f"[ERROR] Energy type error: {e}")
+        raise
+
+    # Extract energies and generate parameters
+    energies = parsed.get("energies") or []
+    if not energies:
+        # Fallback: create energy from top-level fields if available
+        energies = [{
+            "type": (parsed.get("type_facture") or "electricite"),
+            "fournisseur": parsed.get("fournisseur"),
+            "offre": parsed.get("offre"),
+            "option": parsed.get("option"),
+            "puissance_kVA": parsed.get("puissance_kVA"),
+            "conso_kwh": parsed.get("consommation_kWh"),
+            "abonnement_ttc": parsed.get("abonnement_TTC"),
+            "total_ttc": parsed.get("total_TTC"),
+        }]
+
+    # Generate sections with offers for each energy type
+    sections = []
+    energy_seen = set()
+
+    for energy_data in energies:
+        params = params_from_energy(parsed, energy_data, combined_raw_text)
+        current_total = current_annual_total(params)
+
+        if current_total is None:
+            print(f"[WARN] Could not calculate current annual total for {params['energy']}")
+            current_total = 1000.0  # Fallback estimate
+
+        # Generate synthetic offers
+        offers = []
+        if params["energy"] == "electricite":
+            offers += make_base_offers(params, current_total)
+            offers += make_hphc_offers(params, current_total)
+        else:  # gaz
+            offers += make_base_offers(params, current_total)
+
+        sections.append({"params": params, "rows": offers})
+        energy_seen.add(params["energy"])
+
+        print(f"[INFO] Generated {len(offers)} offers for {params['energy']}")
+
+    # Generate dual pack offers if both energies present
+    combined_dual = []
+    has_elec = any(s["params"]["energy"] == "electricite" for s in sections)
+    has_gaz = any(s["params"]["energy"] == "gaz" for s in sections)
+
+    if has_elec and has_gaz:
+        elec_section = next(s for s in sections if s["params"]["energy"] == "electricite")
+        gaz_section = next(s for s in sections if s["params"]["energy"] == "gaz")
+
+        elec_rows = elec_section["rows"]
+        gaz_rows = gaz_section["rows"]
+
+        # Only if we truly have offers on both sides
+        if elec_rows and gaz_rows:
+            for i in range(min(3, len(elec_rows), len(gaz_rows))):
+                provider = random.choice([elec_rows[i]["provider"], gaz_rows[i]["provider"]])
+                combined_dual.append({
+                    "provider": provider,
+                    "offer_name": f"{elec_rows[i]['offer_name']} + {gaz_rows[i]['offer_name']}",
+                    "total_annuel_estime": elec_rows[i]["total_annuel_estime"] + gaz_rows[i]["total_annuel_estime"],
+                })
+            combined_dual.sort(key=lambda x: x["total_annuel_estime"])
+            print(f"[INFO] Generated {len(combined_dual)} dual pack offers")
+
+    # Generate PDF reports
+    print("[INFO] Generating PDF reports...")
+    non_anon_path, anon_path = build_pdfs(parsed, sections, combined_dual, base_out)
+
+    return non_anon_path, anon_path
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ CLI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# CLI - Updated to handle both PDFs and images
 if __name__ == "__main__":
     import argparse, sys, os
 
     parser = argparse.ArgumentParser(
         prog="report_pioui_static_v3_gemini.py",
-        description="Génère deux rapports (anonyme / non-anonyme) à partir d'une facture d'énergie."
+        description="Génère deux rapports (anonyme / non-anonyme) à partir d'une facture d'énergie (PDF ou images)."
     )
-    parser.add_argument("invoice_path", help="Chemin vers le PDF de la facture")
+    parser.add_argument("input_paths", nargs='+', help="Chemin(s) vers le PDF ou les images de la facture")
     parser.add_argument("-e", "--energy", default="auto",
                         help="Type attendu: auto | gaz | electricite | dual (par défaut: auto)")
     parser.add_argument("-c", "--conf", type=float, default=0.5,
@@ -1358,27 +1580,86 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    invoice_path = args.invoice_path
-    if not os.path.exists(invoice_path):
-        print(f"[ERROR] File not found: {invoice_path}")
+    # Validate input paths
+    input_paths = [os.path.abspath(p) for p in args.input_paths]
+
+    # Check that all files exist
+    for path in input_paths:
+        if not os.path.exists(path):
+            print(f"[ERROR] File not found: {path}")
+            sys.exit(1)
+
+    # Determine if we're processing PDF or images
+    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+    pdf_extensions = {'.pdf'}
+
+    # Check file types
+    file_types = []
+    for path in input_paths:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in pdf_extensions:
+            file_types.append('pdf')
+        elif ext in image_extensions:
+            file_types.append('image')
+        else:
+            print(f"[ERROR] Unsupported file type: {ext}")
+            sys.exit(1)
+
+    # Validate that we don't have mixed types
+    unique_types = set(file_types)
+    if len(unique_types) > 1:
+        print("[ERROR] Cannot mix PDFs and images. Please provide either PDF(s) or image(s), not both.")
+        sys.exit(1)
+
+    # Validate that we have only one PDF if PDF type
+    if 'pdf' in unique_types and len(input_paths) > 1:
+        print("[ERROR] Multiple PDFs not supported. Please provide a single PDF file.")
         sys.exit(1)
 
     try:
-        non_anon, anon = process_invoice_file(
-            invoice_path,
-            energy_mode=args.energy,
-            confidence_min=max(0.0, min(1.0, args.conf)),
-            strict=(not args.no_strict)
-        )
+        if 'pdf' in unique_types:
+            # Single PDF processing
+            print(f"[INFO] Processing PDF: {input_paths[0]}")
+            non_anon, anon = process_invoice_file(
+                input_paths[0],
+                energy_mode=args.energy,
+                confidence_min=max(0.0, min(1.0, args.conf)),
+                strict=(not args.no_strict)
+            )
+        else:
+            # Image processing (single or multiple)
+            if len(input_paths) == 1:
+                print(f"[INFO] Processing single image: {input_paths[0]}")
+            else:
+                print(f"[INFO] Processing {len(input_paths)} images as multi-page invoice")
+
+            non_anon, anon = process_image_files(
+                input_paths,
+                energy_mode=args.energy,
+                confidence_min=max(0.0, min(1.0, args.conf)),
+                strict=(not args.no_strict)
+            )
+
         print("\n🎉 Reports generated successfully!")
-        print(f"   -> {non_anon}")
-        print(f"   -> {anon}")
+        print(f"   -> Non-anonymous: {non_anon}")
+        print(f"   -> Anonymous: {anon}")
+
     except EnergyTypeMismatchError as e:
         print(f"[ERROR] Type d'énergie incorrect: {e}")
+        print("[HINT] Try using --no-strict to override energy type detection")
         sys.exit(2)
     except EnergyTypeError as e:
         print(f"[ERROR] Paramètre: {e}")
         sys.exit(3)
+    except FileNotFoundError as e:
+        print(f"[ERROR] File not found: {e}")
+        sys.exit(4)
+    except ValueError as e:
+        print(f"[ERROR] Invalid input: {e}")
+        sys.exit(5)
     except Exception as e:
-        print(f"[ERROR] Unexpected: {e}")
+        print(f"[ERROR] Unexpected error: {e}")
+        import traceback
+
+        traceback.print_exc()
         sys.exit(99)
