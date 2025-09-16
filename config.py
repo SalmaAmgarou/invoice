@@ -32,6 +32,8 @@ class Config:
     # Allowed file extensions
     ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif'}
 
+    MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+
     @staticmethod
     def create_folders():
         """Create necessary folders if they don't exist"""

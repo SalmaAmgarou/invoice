@@ -1,0 +1,29 @@
+{
+  "type_facture": "electricite",
+  "client": {
+    "name": "PEREIRA TRINDADE A TRINDADE RICARDO T",
+    "address": "390 RUE DU 19 MARS 1962",
+    "zipcode": "30190 LA CALMETTE"
+  },
+  "periode": {
+    "de": "01/07/2023",
+    "a": "31/07/2023",
+    "jours": 31
+  },
+  "energies": [
+    {
+      "type": "electricite",
+      "fournisseur": "EDF",
+      "offre": "Vert Electrique",
+      "option": "HP/HC",
+      "puissance_kVA": 9,
+      "conso_kwh_total": 370.0,
+      "conso_hc_kwh": 79.0,
+      "conso_hp_kwh": 291.0,
+      "prix_hc_eur_kwh": 0.1383,
+      "prix_hp_eur_kwh": 0.1894,
+      "abonnement_ttc": 25.84,
+      "total_ttc": 98.68
+    }
+  ]
+}
