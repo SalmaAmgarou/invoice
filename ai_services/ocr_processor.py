@@ -1,98 +1,156 @@
 import os
-import pytesseract
-from PIL import Image
-import pdfplumber
-from pdfplumber.display import PageImage
+import tempfile
 import logging
 from typing import Optional
+from pathlib import Path
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+import PyPDF2
+import pytesseract
+from PIL import Image
+from pdf2image import convert_from_path
+
+from config import Config
+
 logger = logging.getLogger(__name__)
 
 
-def extract_text_from_image(file_path: str) -> str:
-    """
-    Extracts text from an image file using Tesseract OCR.
+class OCRProcessor:
+    def __init__(self):
+        # Set tesseract command path if specified
+        if Config.TESSERACT_CMD != "tesseract":
+            pytesseract.pytesseract.tesseract_cmd = Config.TESSERACT_CMD
 
-    Args:
-        file_path: The path to the image file.
+    def extract_text_from_file(self, file_path: str) -> str:
+        """
+        Extract text from PDF or image file
 
-    Returns:
-        The extracted text as a string.
-    """
-    try:
-        text = pytesseract.image_to_string(Image.open(file_path), lang='fra')
-        logger.info(f"Successfully extracted text from image: {file_path}")
-        return text
-    except Exception as e:
-        logger.error(f"Error during OCR for image {file_path}: {e}")
-        return ""
+        Args:
+            file_path: Path to the file
 
+        Returns:
+            Extracted text string
 
-def extract_text_from_pdf(file_path: str, use_ocr_fallback: bool = True) -> Optional[str]:
-    """
-    Extracts text from a PDF file.
+        Raises:
+            ValueError: If file type is not supported
+            Exception: If text extraction fails
+        """
+        file_extension = Path(file_path).suffix.lower()
 
-    It first tries direct text extraction. If that fails or returns minimal text,
-    it uses a fallback mechanism to convert each page to an image and perform OCR.
+        try:
+            if file_extension == '.pdf':
+                return self._extract_text_from_pdf(file_path)
+            elif file_extension in ['.png', '.jpg', '.jpeg', '.gif']:
+                return self._extract_text_from_image(file_path)
+            else:
+                raise ValueError(f"Type de fichier non supporté: {file_extension}")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'extraction du texte de {file_path}: {str(e)}")
+            raise Exception(f"Impossible d'extraire le texte du fichier: {str(e)}")
 
-    Args:
-        file_path: The path to the PDF file.
-        use_ocr_fallback: Whether to use OCR if direct extraction fails.
+    def _extract_text_from_pdf(self, pdf_path: str) -> str:
+        """Extract text from PDF file, with OCR fallback if no text found"""
+        text = ""
 
-    Returns:
-        The extracted text, or None if extraction fails completely.
-    """
-    text = ""
-    try:
-        with pdfplumber.open(file_path) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
+        try:
+            # First, try to extract text directly from PDF
+            with open(pdf_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                for page in pdf_reader.pages:
+                    text += page.extract_text() + "\n"
+
+            # If no text extracted, use OCR on PDF pages
+            if not text.strip():
+                logger.info(f"Pas de texte extrait directement du PDF {pdf_path}, utilisation de l'OCR")
+                text = self._ocr_pdf_pages(pdf_path)
+
+        except Exception as e:
+            logger.error(f"Erreur lors de l'extraction directe du PDF: {str(e)}")
+            # Fallback to OCR
+            text = self._ocr_pdf_pages(pdf_path)
+
+        return text.strip()
+
+    def _ocr_pdf_pages(self, pdf_path: str) -> str:
+        """Convert PDF pages to images and run OCR"""
+        text = ""
+
+        try:
+            # Convert PDF pages to images
+            pages = convert_from_path(pdf_path, dpi=300)
+
+            for i, page in enumerate(pages):
+                logger.info(f"Traitement OCR de la page {i + 1}/{len(pages)}")
+
+                # Save page as temporary image
+                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_img:
+                    page.save(temp_img.name, 'JPEG')
+
+                    # Run OCR on the image
+                    page_text = pytesseract.image_to_string(
+                        temp_img.name,
+                        lang='fra',  # French language
+                        config='--oem 3 --psm 6'  # OCR Engine Mode 3, Page Segmentation Mode 6
+                    )
                     text += page_text + "\n"
 
-        # If the extracted text is very short, it might be a scanned PDF.
-        if len(text.strip()) > 50:
-            logger.info(f"Successfully extracted text directly from PDF: {file_path}")
-            return text
+                    # Clean up temporary file
+                    os.unlink(temp_img.name)
 
-        logger.warning(f"Direct text extraction from {file_path} yielded little to no text.")
-        if not use_ocr_fallback:
-            return text if text.strip() else None
+        except Exception as e:
+            logger.error(f"Erreur lors de l'OCR des pages PDF: {str(e)}")
+            raise Exception(f"Échec de l'OCR sur le PDF: {str(e)}")
 
-        # --- OCR Fallback ---
-        logger.info(f"Attempting OCR fallback for {file_path}")
-        ocr_text = ""
-        with pdfplumber.open(file_path) as pdf:
-            for i, page in enumerate(pdf.pages):
-                # Convert page to image
-                img: PageImage = page.to_image(resolution=300)
-                # Perform OCR on the image
-                page_ocr_text = pytesseract.image_to_string(img.original, lang='fra')
-                ocr_text += page_ocr_text + "\n"
+        return text.strip()
 
-        if ocr_text.strip():
-            logger.info(f"Successfully extracted text via OCR from PDF: {file_path}")
-            return ocr_text
-        else:
-            logger.error(f"OCR fallback also failed to extract text from {file_path}")
-            return None
+    def _extract_text_from_image(self, image_path: str) -> str:
+        """Extract text from image using OCR"""
+        try:
+            # Open and process image
+            image = Image.open(image_path)
 
-    except Exception as e:
-        logger.error(f"Failed to process PDF {file_path}: {e}")
-        return None
+            # Convert to RGB if necessary
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
 
+            # Run OCR
+            text = pytesseract.image_to_string(
+                image,
+                lang='fra',  # French language
+                config='--oem 3 --psm 6'  # OCR Engine Mode 3, Page Segmentation Mode 6
+            )
 
-def extract_text(file_path: str, mime_type: str) -> Optional[str]:
-    """
-    A wrapper function that extracts text from a file based on its MIME type.
-    """
-    logger.info(f"Extracting text from {file_path} with MIME type {mime_type}")
-    if "pdf" in mime_type:
-        return extract_text_from_pdf(file_path)
-    elif "image" in mime_type:
-        return extract_text_from_image(file_path)
-    else:
-        logger.error(f"Unsupported file type: {mime_type}")
-        return None
+            return text.strip()
+
+        except Exception as e:
+            logger.error(f"Erreur lors de l'OCR de l'image: {str(e)}")
+            raise Exception(f"Échec de l'OCR sur l'image: {str(e)}")
+
+    def is_text_extracted(self, text: str) -> bool:
+        """Check if meaningful text was extracted"""
+        if not text or not text.strip():
+            return False
+
+        # Check if we have at least some reasonable amount of text
+        words = text.split()
+        return len(words) >= 5  # At least 5 words
+
+    def preprocess_text(self, text: str) -> str:
+        """Clean and preprocess extracted text"""
+        if not text:
+            return ""
+
+        # Remove excessive whitespace and normalize line breaks
+        lines = []
+        for line in text.split('\n'):
+            line = line.strip()
+            if line:  # Only keep non-empty lines
+                lines.append(line)
+
+        # Join lines with single newlines
+        cleaned_text = '\n'.join(lines)
+
+        # Remove multiple consecutive spaces
+        import re
+        cleaned_text = re.sub(r' +', ' ', cleaned_text)
+
+        return cleaned_text

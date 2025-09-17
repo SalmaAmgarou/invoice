@@ -1,176 +1,238 @@
+"""
+app/main.py — FastAPI wrapper for your existing CLI pipeline (test_chatgpt.py)
+
+Key goals:
+- Keep ALL business logic in test_chatgpt.py unchanged; only wrap it behind HTTP.
+- Provide 2 production‑ready async endpoints that simulate your two CLI modes:
+  • POST /v1/invoices/pdf    -> python3 test_chatgpt.py <file.pdf> -e <energy>
+  • POST /v1/invoices/images -> python3 test_chatgpt.py <img1> <img2> ... -e <energy>
+- Persist uploads and expose generated reports via a static route (/reports/...)
+- Validate inputs, run CPU/IO work in threadpool, return clean JSON payloads
+
+Run locally:
+  uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+Notes:
+- For image invoices, set env MISTRAL_API_KEY (Pixtral) since your pipeline calls it.
+- OPENAI_API_KEY must be set as in your current script.
+- The wrapper saves uploads to Config.REPORTS_FOLDER so your pipeline writes reports there too.
+"""
+from __future__ import annotations
+
 import os
 import uuid
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
+import shutil
+from pathlib import Path
+from typing import List, Literal, Optional, Tuple
 
-# Import your existing pipeline (no logic changes)
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
+
+# Import your existing logic (unchanged)
+from config import Config
 from test_chatgpt import (
     process_invoice_file,
-    EnergyTypeMismatchError,
+    process_image_files,
     EnergyTypeError,
+    EnergyTypeMismatchError,
 )
-from typing import List
-import io
-from PIL import Image
 
-ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
+# ————————————————————————————————————————————————————————————————
+# App setup
+# ————————————————————————————————————————————————————————————————
+Config.create_folders()
 
-def _open_as_rgb(img_bytes: bytes) -> Image.Image:
-    img = Image.open(io.BytesIO(img_bytes))
-    if img.mode not in ("RGB",):
-        img = img.convert("RGB")
-    return img
+app = FastAPI(title="Pioui Invoice OCR API", version="1.0.0")
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(APP_DIR, "outputs")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-app = FastAPI(title="Pioui Report API", version="1.0.0")
-
-# (Optional) CORS for local testing / Postman
+# CORS (adjust for your FE origins)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten for prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Serve generated reports at /reports/*
+app.mount("/reports", StaticFiles(directory=Config.REPORTS_FOLDER), name="reports")
+
+
+# ————————————————————————————————————————————————————————————————
+# Models
+# ————————————————————————————————————————————————————————————————
+EnergyMode = Literal["auto", "electricite", "gaz", "dual"]
+
+class ProcessResponse(BaseModel):
+    engine: Literal["pdf", "images"]
+    energy: EnergyMode
+    confidence_min: float = Field(..., ge=0, le=1)
+    strict: bool
+    input_saved_as: str
+    non_anonymous_report_url: str
+    anonymous_report_url: str
+
+
+# ————————————————————————————————————————————————————————————————
+# Helpers
+# ————————————————————————————————————————————————————————————————
+SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+
+def _safe_filename(name: str) -> str:
+    cleaned = "".join(ch for ch in name if ch in SAFE_CHARS) or "file"
+    return cleaned.strip(".")
+
+
+def _save_upload_to_reports_folder(upload: UploadFile, prefix: str) -> str:
+    """Save an uploaded file into REPORTS_FOLDER with a unique name.
+    Returns absolute path to the saved file.
+    """
+    ext = Path(upload.filename or "").suffix.lower()
+    if ext not in {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported file extension: {ext or 'unknown'}")
+
+    uid = uuid.uuid4().hex[:8]
+    fname = f"{prefix}_{uid}_{_safe_filename(upload.filename or 'upload')}{ext}"
+    dest = Path(Config.REPORTS_FOLDER) / fname
+
+    # Stream to disk
+    with dest.open("wb") as out:
+        shutil.copyfileobj(upload.file, out)
+    return str(dest)
+
+
+def _as_report_url(abs_path: str) -> str:
+    name = Path(abs_path).name
+    return f"/reports/{name}"
+
+
+# ————————————————————————————————————————————————————————————————
+# Endpoints
+# ————————————————————————————————————————————————————————————————
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+async def health():
+    return {"ok": True}
 
 
-# --- new endpoint in app.py ---
-@app.post("/process-invoice-images")
-async def process_invoice_images(
-    files: List[UploadFile] = File(..., description="Pages de la facture (PNG/JPG/WEBP/TIFF)"),
-    energy: str = Form("auto"),
-    conf: float = Form(0.5),
+@app.post("/v1/invoices/pdf", response_model=ProcessResponse)
+async def process_pdf_invoice(
+    file: UploadFile = File(..., description="Single PDF invoice"),
+    energy: EnergyMode = Form(..., description="auto | electricite | gaz | dual"),
+    confidence_min: float = Form(0.5, ge=0.0, le=1.0),
     strict: bool = Form(True),
 ):
-    if not files:
-        raise HTTPException(status_code=400, detail="Aucune image fournie.")
+    """Simulates: python3 test_chatgpt.py <invoice.pdf> -e <energy> [-c <conf>] [--no-strict]
 
-    # read + validate extensions
-    contents = []
-    for f in files:
-        ext = os.path.splitext(f.filename or "")[1].lower()
-        if ext not in ALLOWED_IMAGE_EXTS:
-            raise HTTPException(status_code=400, detail=f"Extension non supportée: {ext or 'unknown'}")
-        contents.append(await f.read())
-
-    # convert all images to RGB and (optionally) upscale small pages for better OCR
-    pages = []
-    for b in contents:
-        img = _open_as_rgb(b)
-        if img.width < 2000:
-            ratio = 2000 / img.width
-            img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.LANCZOS)
-        pages.append(img)
-
-    # save as a single multi-page PDF in outputs/
-    unique_stem = f"facture_imgs_{uuid.uuid4().hex[:8]}"
-    pdf_path = os.path.join(OUTPUT_DIR, unique_stem + ".pdf")
-    try:
-        if len(pages) == 1:
-            pages[0].save(pdf_path, "PDF", resolution=300.0)
-        else:
-            pages[0].save(pdf_path, "PDF", save_all=True, append_images=pages[1:], resolution=300.0)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Échec création PDF: {e}")
-
-    # run your unchanged pipeline
-    conf_clamped = max(0.0, min(1.0, float(conf)))
-    try:
-        non_anon, anon = process_invoice_file(
-            pdf_path,
-            energy_mode=energy,
-            confidence_min=conf_clamped,
-            strict=bool(strict),
-        )
-        return {
-            "ok": True,
-            "used_pdf": os.path.relpath(pdf_path, OUTPUT_DIR),
-            "output_dir": "outputs",
-            "non_anonymous_report": os.path.relpath(non_anon, OUTPUT_DIR),
-            "anonymous_report": os.path.relpath(anon, OUTPUT_DIR),
-            "download_example": {
-                "non_anonymous": f"/download?path={os.path.relpath(non_anon, OUTPUT_DIR)}",
-                "anonymous": f"/download?path={os.path.relpath(anon, OUTPUT_DIR)}",
-            },
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
-
-
-@app.post("/process-invoice")
-async def process_invoice(
-    file: UploadFile = File(..., description="PDF energy invoice"),
-    energy: str = Form("auto"),
-    conf: float = Form(0.5, description="confidence threshold [0..1]"),
-    strict: bool = Form(True, description="strict mode"),
-):
+    - Upload is written into REPORTS_FOLDER, so your pipeline writes reports next to it.
+    - Returns URLs to the two generated PDFs.
     """
-    Upload a PDF invoice and generate the two reports.
-    The PDF is saved into ./outputs so all generated reports are also in ./outputs.
-    """
-    # Basic validation
-    filename = file.filename or "invoice.pdf"
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    # Save upload (to control where pipeline writes outputs)
+    saved_pdf = _save_upload_to_reports_folder(file, prefix="pdf")
 
-    # Save the uploaded file into outputs/ (so your script also writes reports into outputs/)
-    unique_name = f"{os.path.splitext(os.path.basename(filename))[0]}_{uuid.uuid4().hex[:8]}.pdf"
-    saved_pdf_path = os.path.join(OUTPUT_DIR, unique_name)
+    # Call your existing sync function in a worker thread
     try:
-        content = await file.read()
-        with open(saved_pdf_path, "wb") as f:
-            f.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {e}")
-
-    # Clamp conf to [0,1] like your CLI wrapper
-    conf_clamped = max(0.0, min(1.0, float(conf)))
-
-    try:
-        non_anon, anon = process_invoice_file(
-            saved_pdf_path,
+        non_anon, anon = await run_in_threadpool(
+            process_invoice_file,
+            saved_pdf,
             energy_mode=energy,
-            confidence_min=conf_clamped,
-            strict=bool(strict),
-        )
-        # Return paths relative to outputs/ and a download helper
-        return JSONResponse(
-            {
-                "ok": True,
-                "output_dir": "outputs",
-                "non_anonymous_report": os.path.relpath(non_anon, OUTPUT_DIR),
-                "anonymous_report": os.path.relpath(anon, OUTPUT_DIR),
-                "download_example": {
-                    "non_anonymous": f"/download?path={os.path.relpath(non_anon, OUTPUT_DIR)}",
-                    "anonymous": f"/download?path={os.path.relpath(anon, OUTPUT_DIR)}",
-                },
-            }
+            confidence_min=confidence_min,
+            strict=strict,
         )
     except EnergyTypeMismatchError as e:
         raise HTTPException(status_code=422, detail=f"Energy type mismatch: {e}")
     except EnergyTypeError as e:
-        raise HTTPException(status_code=400, detail=f"Bad parameter: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
 
-@app.get("/download")
-def download(path: str = Query(..., description="Path relative to outputs/")):
-    """
-    Download a generated PDF by giving its relative path (as returned by /process-invoice).
-    """
-    abs_path = os.path.join(OUTPUT_DIR, path)
-    if not os.path.isfile(abs_path):
-        raise HTTPException(status_code=404, detail="File not found.")
-    return FileResponse(
-        abs_path,
-        media_type="application/pdf",
-        filename=os.path.basename(abs_path),
+    return ProcessResponse(
+        engine="pdf",
+        energy=energy,
+        confidence_min=confidence_min,
+        strict=strict,
+        input_saved_as=_as_report_url(saved_pdf),
+        non_anonymous_report_url=_as_report_url(non_anon),
+        anonymous_report_url=_as_report_url(anon),
     )
+
+
+@app.post("/v1/invoices/images", response_model=ProcessResponse)
+async def process_image_invoices(
+    files: List[UploadFile] = File(..., description="1..8 image files for a single invoice"),
+    energy: EnergyMode = Form(..., description="auto | electricite | gaz | dual"),
+    confidence_min: float = Form(0.5, ge=0.0, le=1.0),
+    strict: bool = Form(True),
+):
+    """Simulates: python3 test_chatgpt.py <img1> <img2> ... -e <energy> [-c <conf>] [--no-strict]
+
+    Your pipeline calls Pixtral; ensure MISTRAL_API_KEY is set in environment.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one image is required")
+
+    # Save all uploads in the reports folder so the pipeline writes reports there
+    saved_images: List[str] = []
+    try:
+        for i, f in enumerate(files, start=1):
+            saved_images.append(_save_upload_to_reports_folder(f, prefix=f"img{i:02d}"))
+    finally:
+        # Ensure file handles are closed
+        for f in files:
+            try:
+                f.file.close()
+            except Exception:
+                pass
+
+    # Call your existing sync function in a worker thread
+    try:
+        non_anon, anon = await run_in_threadpool(
+            process_image_files,
+            saved_images,
+            energy_mode=energy,
+            confidence_min=confidence_min,
+            strict=strict,
+        )
+    except EnergyTypeMismatchError as e:
+        raise HTTPException(status_code=422, detail=f"Energy type mismatch: {e}")
+    except EnergyTypeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+
+    # For convenience, point to the first uploaded image as the input reference
+    return ProcessResponse(
+        engine="images",
+        energy=energy,
+        confidence_min=confidence_min,
+        strict=strict,
+        input_saved_as=_as_report_url(saved_images[0]),
+        non_anonymous_report_url=_as_report_url(non_anon),
+        anonymous_report_url=_as_report_url(anon),
+    )
+
+
+# ————————————————————————————————————————————————————————————————
+# Optional: simple index
+# ————————————————————————————————————————————————————————————————
+@app.get("/")
+async def index():
+    return {
+        "name": "Pioui Invoice OCR API",
+        "version": "1.0.0",
+        "routes": [
+            {"POST": "/v1/invoices/pdf"},
+            {"POST": "/v1/invoices/images"},
+            {"GET": "/reports/<filename>"},
+        ],
+    }

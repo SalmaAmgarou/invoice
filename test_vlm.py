@@ -241,7 +241,7 @@ def main():
     ap.add_argument("images", nargs="+", help="Paths to 1..8 images (one invoice).")
     ap.add_argument("-e", "--energy", default="auto",
                     help="Energy type hint: auto|electricite|gaz|dual (default: auto)")
-    ap.add_argument("--model", default="pixtral-large-latest",
+    ap.add_argument("--model", default="pixtral-12b-latest",
                     help="Mistral vision model (pixtral-large-latest or pixtral-12b-latest).")
     ap.add_argument("--out", default=None, help="Output JSON path. Default: <first>_<ts>_pixtral.json")
     args = ap.parse_args()

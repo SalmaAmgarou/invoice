@@ -17,6 +17,7 @@ import os, json, random, datetime
 from datetime import date, datetime as dt
 from typing import List, Dict, Any, Tuple, Optional
 import instructor
+from mistralai import Mistral
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 # --- OpenAI ---
@@ -1371,6 +1372,152 @@ def process_invoice_file(pdf_path: str,
 
     return build_pdfs(parsed, sections, combined_dual, base_out)
 
+_PIXTRAL_SYSTEM = (
+    "You extract structured data from French electricity/gas invoices. "
+    "Return ONLY a JSON object (no prose, no markdown). "
+    "If something is not visible, return an empty string for that field."
+)
+
+_PIXTRAL_USER_INSTRUCTIONS = """\
+From these image(s) of a French utility invoice, return this JSON:
+
+{
+  "type_facture": "electricite|gaz|dual",
+  "client": {"name":"", "address":"", "zipcode":""},
+  "periode": {"de":"JJ/MM/AAAA", "a":"JJ/MM/AAAA", "jours":""},
+  "energies": [
+    {
+      "type":"electricite|gaz",
+      "fournisseur":"",
+      "offre":"",
+      "option":"Base|Heures Creuses|HP/HC",
+      "puissance_kVA":"",
+      "conso_kwh_total":"",
+      "conso_hc_kwh":"",
+      "conso_hp_kwh":"",
+      "prix_hc_eur_kwh":"",
+      "prix_hp_eur_kwh":"",
+      "abonnement_ttc":"",
+      "total_ttc":""
+    }
+  ]
+}
+
+Rules:
+- Copy numbers as printed (e.g., '98,68 €', '0,1894'); do not invent values.
+- Use empty string "" for any unknown field.
+- Use French field names exactly as shown.
+"""
+
+def _fr_num(s):
+    import re
+    if not isinstance(s, str): return None
+    x = re.sub(r"[^\d,.\-]", "", s)
+    if "," in x and "." in x: x = x.replace(".", "").replace(",", ".")
+    elif "," in x: x = x.replace(",", ".")
+    try: return float(x)
+    except: return None
+
+def _extract_json_loose(s: str) -> dict:
+    import json, re
+    try:
+        return json.loads(s)
+    except Exception:
+        m = re.search(r"\{.*\}", s, flags=re.S)
+        if not m:
+            raise
+        return json.loads(m.group(0))
+
+def normalize_pixtral_json(data: dict) -> dict:
+    """Coerce fields to what the pipeline expects."""
+    import re
+
+    # periode.jours -> int if str
+    j = (data.get("periode") or {}).get("jours")
+    if isinstance(j, str):
+        m = re.search(r"\d+", j)
+        data["periode"]["jours"] = int(m.group(0)) if m else None
+
+    # fill zipcode if missing (extract from address)
+    cli = data.get("client") or {}
+    if (cli.get("zipcode") in (None, "")) and cli.get("address"):
+        m = re.search(r"\b\d{5}\b", cli["address"])
+        if m:
+            cli["zipcode"] = m.group(0)
+            data["client"] = cli
+
+    energies = data.get("energies") or []
+    for e in energies:
+        # Normalize option
+        opt = (e.get("option") or "").strip().lower()
+        if opt in {"heures creuses", "hp/hc", "heures pleines/creuses", "heures pleines et creuses", "hc/hp", "hp hc"}:
+            e["option"] = "HP/HC"
+        elif opt in {"base", "option base"}:
+            e["option"] = "Base"
+
+        # Numbers => floats
+        for k in ("conso_kwh_total","conso_hc_kwh","conso_hp_kwh",
+                  "prix_hc_eur_kwh","prix_hp_eur_kwh",
+                  "abonnement_ttc","total_ttc"):
+            if k in e and isinstance(e[k], str):
+                e[k] = _fr_num(e[k])
+
+        # puissance -> int
+        if isinstance(e.get("puissance_kVA"), str):
+            m = re.search(r"\d+", e["puissance_kVA"])
+            e["puissance_kVA"] = int(m.group(0)) if m else None
+
+        # Add legacy key your pipeline expects
+        if e.get("conso_kwh") is None and e.get("conso_kwh_total") is not None:
+            e["conso_kwh"] = e["conso_kwh_total"]
+
+        # Fix total kWh if inconsistent with HP/HC
+        hp = e.get("conso_hp_kwh") or 0
+        hc = e.get("conso_hc_kwh") or 0
+        if (hp or hc):
+            s = (hp or 0) + (hc or 0)
+            tot = e.get("conso_kwh_total")
+            if tot is None or (s and abs(s - tot) / max(s, 1) > 0.2) or (tot and tot > 20000):
+                e["conso_kwh_total"] = s
+                e["conso_kwh"] = s
+
+    data["energies"] = energies
+    return data
+
+def pixtral_extract_invoice(image_paths: List[str],
+                            model: str = "pixtral-large-latest",
+                            energy_hint: str | None = None) -> dict:
+    """Call Mistral Pixtral on 1..8 images and return normalized JSON."""
+    if not Config.MISTRAL_API_KEY:
+        raise RuntimeError("Set MISTRAL_API_KEY in your environment or Config.")
+    if len(image_paths) > 8:
+        raise ValueError("Pixtral accepts up to 8 images per request.")
+
+    client = Mistral(api_key=Config.MISTRAL_API_KEY)
+
+    content = [{"type": "text", "text": _PIXTRAL_USER_INSTRUCTIONS}]
+    if energy_hint and energy_hint != "auto":
+        content.insert(0, {"type": "text", "text": f"Type attendu: {energy_hint}."})
+
+    # Reuse your existing helper to embed as data URLs
+    for p in image_paths:
+        content.append({"type": "image_url", "image_url": _image_to_data_url(p)})
+
+    resp = client.chat.complete(
+        model=model,
+        messages=[
+            {"role": "system", "content": _PIXTRAL_SYSTEM},
+            {"role": "user", "content": content},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
+        max_tokens=2200,
+    )
+    print("[Mistral] usage:", getattr(resp, "usage", None))
+    raw = resp.choices[0].message.content
+    parsed = _extract_json_loose(raw)
+    return normalize_pixtral_json(parsed)
+
 
 def process_image_files(image_paths: List[str],
                         energy_mode: str = "auto",
@@ -1378,94 +1525,44 @@ def process_image_files(image_paths: List[str],
                         strict: bool = True,
                         auto_save_suffix_date: bool = True) -> Tuple[str, str]:
     """
-    Process multiple image files (invoice pages) directly
-
-    Args:
-        image_paths: List of paths to image files (jpg, png, etc.)
-        energy_mode: Energy type detection mode ("auto", "gaz", "electricite", "dual")
-        confidence_min: Minimum confidence threshold for energy type detection
-        strict: Whether to raise errors on energy type mismatches
-        auto_save_suffix_date: Whether to add timestamp to output filenames
-
-    Returns:
-        Tuple of (non_anonymous_pdf_path, anonymous_pdf_path)
+    Process multiple image files (invoice pages) directly -> JSON -> build PDFs.
+    Uses Pixtral vision for extraction, then your existing pipeline.
     """
-
     if not image_paths:
         raise ValueError("No image paths provided")
 
-    # Validate that all paths exist and are image files
+    # Validate paths and extensions
     image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
     for img_path in image_paths:
         if not os.path.exists(img_path):
             raise FileNotFoundError(f"Image file not found: {img_path}")
-
         ext = os.path.splitext(img_path)[1].lower()
         if ext not in image_extensions:
             raise ValueError(f"Unsupported image format: {ext}")
 
-    # Use first image's directory and name for output
+    # Output naming based on first image
     first_image = os.path.abspath(image_paths[0])
     basename = os.path.splitext(os.path.basename(first_image))[0]
     out_dir = os.path.dirname(first_image)
-
-    # Generate output filename with optional timestamp
     suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") if auto_save_suffix_date else ""
     base_out = os.path.join(out_dir, f"{basename}{('_' + suffix) if suffix else ''}")
 
-    print(f"[INFO] Processing {len(image_paths)} image files with OCR...")
+    # 1) Extract with Pixtral
+    print(f"[INFO] Extracting structure with Pixtral ({len(image_paths)} image(s))...")
+    model = os.getenv("PIOUI_PIXTRAL_MODEL", "pixtral-large-latest")
+    parsed = pixtral_extract_invoice(
+        image_paths,
+        model=model,
+        energy_hint=(energy_mode if energy_mode != "auto" else None)
+    )
 
-    # OCR all images
-    all_ocr_results = []
-    combined_raw_text = ""
+    # Persist raw JSON for audit
+    json_out = base_out + "_pixtral.json"
+    with open(json_out, "w", encoding="utf-8") as f:
+        json.dump(parsed, f, ensure_ascii=False, indent=2)
+    print(f"[INFO] Saved extraction JSON: {json_out}")
 
-    for i, img_path in enumerate(image_paths):
-        try:
-            print(f"[INFO] Processing image {i + 1}/{len(image_paths)}: {os.path.basename(img_path)}")
-
-            # OCR this page
-            page_ocr_result = ocr_invoice_with_gpt(img_path)
-
-            if page_ocr_result and page_ocr_result.strip():
-                all_ocr_results.append(f"=== PAGE {i + 1} ({os.path.basename(img_path)}) ===\n{page_ocr_result}")
-                # Also build a combined text for energy detection
-                combined_raw_text += f"\n{page_ocr_result}\n"
-            else:
-                print(f"[WARN] No OCR result for {img_path}")
-
-        except Exception as e:
-            print(f"[WARN] Failed to OCR {img_path}: {e}")
-            continue
-
-    if not all_ocr_results:
-        raise ValueError("No images could be processed successfully - all OCR attempts failed")
-
-    print(f"[INFO] Successfully OCR'd {len(all_ocr_results)} pages")
-
-    # Combine all OCR results for parsing
-    combined_ocr_text = "\n\n".join(all_ocr_results)
-
-    # Parse the combined OCR text using the text parser (not OCR parser)
-    parsed = None
-    try:
-        print("[INFO] Parsing combined OCR results...")
-        raw_json = parse_text_with_gpt(combined_ocr_text)
-        parsed = json.loads(raw_json)
-        print("[INFO] Successfully parsed invoice data from images")
-
-    except Exception as e:
-        print(f"[ERROR] Parsing failed: {e}. Using fallback data.")
-        parsed = {
-            "client": {"name": None, "address": None, "zipcode": "75001"},
-            "periode": {"de": None, "a": None, "jours": None},
-            "energies": [{
-                "type": "electricite", "fournisseur": None, "offre": None,
-                "option": "Base", "puissance_kVA": 6, "conso_kwh": 3500,
-                "abonnement_ttc": None, "total_ttc": None
-            }]
-        }
-
-    # Fill "jours" if missing and dates present
+    # 2) Fill "jours" if missing from periode
     periode = parsed.get("periode") or {}
     if not periode.get("jours") and periode.get("de") and periode.get("a"):
         d1, d2 = _parse_date_fr(periode["de"]), _parse_date_fr(periode["a"])
@@ -1473,28 +1570,20 @@ def process_image_files(image_paths: List[str],
             periode["jours"] = (d2 - d1).days
             parsed["periode"] = periode
 
-    # Apply energy mode filtering and detection
-    try:
-        parsed, _diag = apply_energy_mode(
-            parsed,
-            combined_raw_text,  # Use the raw text for energy detection
-            mode=energy_mode,
-            conf_min=confidence_min,
-            strict=strict
-        )
-        print(f"[INFO] Energy mode '{energy_mode}' applied successfully")
+    # 3) Apply energy mode logic (existing function)
+    # We don't have a unified raw OCR text here; pass empty string safely.
+    parsed, _diag = apply_energy_mode(
+        parsed,
+        "",  # raw_text
+        mode=energy_mode,
+        conf_min=confidence_min,
+        strict=strict
+    )
 
-    except EnergyTypeMismatchError as e:
-        print(f"[ERROR] Energy type mismatch: {e}")
-        raise
-    except EnergyTypeError as e:
-        print(f"[ERROR] Energy type error: {e}")
-        raise
-
-    # Extract energies and generate parameters
+    # 4) Build sections and offers (same as in your pipeline)
     energies = parsed.get("energies") or []
     if not energies:
-        # Fallback: create energy from top-level fields if available
+        # Legacy fallback to single-energy structure if model forgot "energies"
         energies = [{
             "type": (parsed.get("type_facture") or "electricite"),
             "fournisseur": parsed.get("fournisseur"),
@@ -1506,44 +1595,25 @@ def process_image_files(image_paths: List[str],
             "total_ttc": parsed.get("total_TTC"),
         }]
 
-    # Generate sections with offers for each energy type
     sections = []
-    energy_seen = set()
-
-    for energy_data in energies:
-        params = params_from_energy(parsed, energy_data, combined_raw_text)
-        current_total = current_annual_total(params)
-
-        if current_total is None:
-            print(f"[WARN] Could not calculate current annual total for {params['energy']}")
-            current_total = 1000.0  # Fallback estimate
-
-        # Generate synthetic offers
+    for e in energies:
+        params = params_from_energy(parsed, e, "")
+        curr = current_annual_total(params)
         offers = []
         if params["energy"] == "electricite":
-            offers += make_base_offers(params, current_total)
-            offers += make_hphc_offers(params, current_total)
-        else:  # gaz
-            offers += make_base_offers(params, current_total)
-
+            offers += make_base_offers(params, curr)
+            offers += make_hphc_offers(params, curr)
+        else:
+            offers += make_base_offers(params, curr)
         sections.append({"params": params, "rows": offers})
-        energy_seen.add(params["energy"])
 
-        print(f"[INFO] Generated {len(offers)} offers for {params['energy']}")
-
-    # Generate dual pack offers if both energies present
+    # 5) Combined dual (if both energies available)
     combined_dual = []
     has_elec = any(s["params"]["energy"] == "electricite" for s in sections)
     has_gaz = any(s["params"]["energy"] == "gaz" for s in sections)
-
     if has_elec and has_gaz:
-        elec_section = next(s for s in sections if s["params"]["energy"] == "electricite")
-        gaz_section = next(s for s in sections if s["params"]["energy"] == "gaz")
-
-        elec_rows = elec_section["rows"]
-        gaz_rows = gaz_section["rows"]
-
-        # Only if we truly have offers on both sides
+        elec_rows = next(s["rows"] for s in sections if s["params"]["energy"] == "electricite")
+        gaz_rows = next(s["rows"] for s in sections if s["params"]["energy"] == "gaz")
         if elec_rows and gaz_rows:
             for i in range(min(3, len(elec_rows), len(gaz_rows))):
                 provider = random.choice([elec_rows[i]["provider"], gaz_rows[i]["provider"]])
@@ -1553,15 +1623,10 @@ def process_image_files(image_paths: List[str],
                     "total_annuel_estime": elec_rows[i]["total_annuel_estime"] + gaz_rows[i]["total_annuel_estime"],
                 })
             combined_dual.sort(key=lambda x: x["total_annuel_estime"])
-            print(f"[INFO] Generated {len(combined_dual)} dual pack offers")
 
-    # Generate PDF reports
-    print("[INFO] Generating PDF reports...")
-    non_anon_path, anon_path = build_pdfs(parsed, sections, combined_dual, base_out)
+    # 6) Render PDFs (existing builder)
+    return build_pdfs(parsed, sections, combined_dual, base_out)
 
-    return non_anon_path, anon_path
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ CLI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # CLI - Updated to handle both PDFs and images
 if __name__ == "__main__":
     import argparse, sys, os
@@ -1577,6 +1642,8 @@ if __name__ == "__main__":
                         help="Seuil de confiance pour bloquer si contradiction (par défaut: 0.5)")
     parser.add_argument("--no-strict", action="store_true",
                         help="Ne pas bloquer en cas de contradiction forte; avertir seulement")
+    parser.add_argument("--vlm", choices=["pixtral", "gpt"], default="pixtral",
+                        help="Vision backend for images (default: pixtral).")
 
     args = parser.parse_args()
 
