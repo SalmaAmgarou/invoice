@@ -44,7 +44,9 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfgen import canvas as rl_canvas
 from openai import OpenAI
 import instructor
-from config import Config
+from core.config import Config
+from pathlib import Path
+
 
 # ───────────────── 🎨 Pioui Branding & Styling 🎨 ─────────────────
 PALETTE = {
@@ -70,9 +72,15 @@ PIOUI = {
 }
 
 # Assets
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGO_PATH = os.path.join(SCRIPT_DIR, "logo", "pioui.png")
-FONT_DIR = os.path.join(SCRIPT_DIR, "fonts")
+
+PKG_ROOT = Path(__file__).resolve().parents[1]  # .../pioui
+ASSETS_DIR = PKG_ROOT / "assets"
+FONT_DIR   = ASSETS_DIR / "fonts"
+LOGO_PATH  = ASSETS_DIR / "logo" / "pioui.png"
+
+# SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# LOGO_PATH = os.path.join(SCRIPT_DIR, "logo", "pioui.png")
+# FONT_DIR = os.path.join(SCRIPT_DIR, "fonts")
 
 
 

@@ -23,13 +23,13 @@ from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
-from config import Config
-from test_chatgpt import (
-    process_invoice_file,
-    process_image_files,
-    EnergyTypeError,
-    EnergyTypeMismatchError,
-)
+from core.config import Config
+from services.reporting.engine import (
+     process_invoice_file,
+     process_image_files,
+     EnergyTypeError,
+     EnergyTypeMismatchError,
+ )
 
 ALLOWED_IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
 
