@@ -73,7 +73,7 @@ PIOUI = {
 
 # Assets
 
-PKG_ROOT = Path(__file__).resolve().parents[1]  # .../pioui
+PKG_ROOT = Path(__file__).resolve().parents[2]  # .../pioui
 ASSETS_DIR = PKG_ROOT / "assets"
 FONT_DIR   = ASSETS_DIR / "fonts"
 LOGO_PATH  = ASSETS_DIR / "logo" / "pioui.png"
@@ -140,10 +140,10 @@ def register_poppins_fonts():
             'Poppins', normal='Poppins', bold='Poppins-Bold',
             italic='Poppins-Italic', boldItalic='Poppins-BoldItalic'
         )
-        print("[INFO] Poppins font family successfully registered.")
+        print("[INFO] Famille de polices Poppins enregistrée avec succès.")
         return True
     except Exception as e:
-        print(f"[WARN] Could not register Poppins fonts. Fallback to Helvetica. Error: {e}")
+        print(f"[AVERTISSEMENT] Impossible d'enregistrer les polices Poppins. Retour à Helvetica. Erreur : {e}")
         return False
 
 IS_POPPINS_AVAILABLE = register_poppins_fonts()
@@ -314,7 +314,7 @@ def parse_text_with_gpt(text: str) -> str: # La fonction retournera toujours un 
         return json.dumps(parsed_dict, indent=2)
 
     except Exception as e:
-        print(f"[ERROR] Instructor/Pydantic parsing failed after retries:: {e}")
+        print(f"[ERREUR] Échec de l'analyse Instructor/Pydantic après les tentatives : {e}")
         # Retourne un JSON vide ou une structure de secours
         return json.dumps({"client": {}, "periode": {}, "energies": []})
 
@@ -1291,14 +1291,14 @@ def process_invoice_file(pdf_path: str,
     text = extract_text_from_pdf(pdf_path)
     parsed = None
     if text and len(text) > 60:
-        print("[INFO] Text-based PDF found. Parsing with GPT...")
+        print("[INFO] PDF basé sur le texte trouvé. Analyse avec GPT...")
         raw = parse_text_with_gpt(text)
         try:
             parsed = json.loads(raw)
         except Exception:
-            print("[WARN] JSON parsing failed. Falling back to OCR...")
+            print("[AVERTISSEMENT] Échec de l'analyse JSON. Retour à l'OCR...")
     if not parsed:
-        print("[INFO] PDF is image-based or text parsing failed. Using OCR via GPT-4o (all pages)...")
+        print("[INFO] Le PDF est basé sur des images ou l'analyse de texte a échoué. Utilisation de l'OCR via GPT-4o (toutes les pages)...")
         try:
             # Note: This part still creates temporary image files from the PDF for OCR, which is necessary.
             out_dir = os.path.dirname(pdf_path)
@@ -1320,7 +1320,7 @@ def process_invoice_file(pdf_path: str,
             parsed = json.loads(raw)
 
         except Exception as e:
-            print(f"[ERROR] OCR and parsing failed: {e}. Using fallback data.")
+            print(f"[ERREUR] Échec de l'OCR et de l'analyse : {e}. Utilisation de données de secours.")
             parsed = {
                 "client": {"name": None, "address": None, "zipcode": "75001"},
                 "periode": {"de": None, "a": None, "jours": None},
@@ -1530,7 +1530,7 @@ def process_image_files(image_paths: List[str],
         raise ValueError("No image paths provided")
 
     # --- All processing logic remains the same ---
-    print(f"[INFO] Extracting structure with Pixtral ({len(image_paths)} image(s))...")
+    print(f"[INFO] Extraction de la structure avec Pixtral ({len(image_paths)} image(s))...")
     model = os.getenv("PIOUI_PIXTRAL_MODEL", "pixtral-large-latest")
     parsed = pixtral_extract_invoice(image_paths, model=model, energy_hint=(energy_mode if energy_mode != "auto" else None))
 
@@ -1604,7 +1604,7 @@ if __name__ == "__main__":
     # Check that all files exist
     for path in input_paths:
         if not os.path.exists(path):
-            print(f"[ERROR] File not found: {path}")
+            print(f"[ERREUR] Fichier introuvable : {path}")
             sys.exit(1)
 
     # Determine if we're processing PDF or images
@@ -1620,24 +1620,24 @@ if __name__ == "__main__":
         elif ext in image_extensions:
             file_types.append('image')
         else:
-            print(f"[ERROR] Unsupported file type: {ext}")
+            print(f"[ERREUR] Type de fichier non supporté : {ext}")
             sys.exit(1)
 
     # Validate that we don't have mixed types
     unique_types = set(file_types)
     if len(unique_types) > 1:
-        print("[ERROR] Cannot mix PDFs and images. Please provide either PDF(s) or image(s), not both.")
+        print("[ERREUR] Impossible de mélanger PDFs et images. Veuillez fournir soit des PDF(s) soit des image(s), pas les deux.")
         sys.exit(1)
 
     # Validate that we have only one PDF if PDF type
     if 'pdf' in unique_types and len(input_paths) > 1:
-        print("[ERROR] Multiple PDFs not supported. Please provide a single PDF file.")
+        print("[ERREUR] Plusieurs PDFs non supportés. Veuillez fournir un seul fichier PDF.")
         sys.exit(1)
 
     try:
         if 'pdf' in unique_types:
             # Single PDF processing
-            print(f"[INFO] Processing PDF: {input_paths[0]}")
+            print(f"[INFO] Traitement du PDF : {input_paths[0]}")
             non_anon, anon = process_invoice_file(
                 input_paths[0],
                 energy_mode=args.energy,
@@ -1647,9 +1647,9 @@ if __name__ == "__main__":
         else:
             # Image processing (single or multiple)
             if len(input_paths) == 1:
-                print(f"[INFO] Processing single image: {input_paths[0]}")
+                print(f"[INFO] Traitement d'une seule image : {input_paths[0]}")
             else:
-                print(f"[INFO] Processing {len(input_paths)} images as multi-page invoice")
+                print(f"[INFO] Traitement de {len(input_paths)} images comme facture multi-pages")
 
             non_anon, anon = process_image_files(
                 input_paths,
@@ -1658,25 +1658,25 @@ if __name__ == "__main__":
                 strict=(not args.no_strict)
             )
 
-        print("\n🎉 Reports generated successfully!")
-        print(f"   -> Non-anonymous: {non_anon}")
-        print(f"   -> Anonymous: {anon}")
+        print("\n🎉 Rapports générés avec succès !")
+        print(f"   -> Non-anonyme : {non_anon}")
+        print(f"   -> Anonyme : {anon}")
 
     except EnergyTypeMismatchError as e:
-        print(f"[ERROR] Type d'énergie incorrect: {e}")
-        print("[HINT] Try using --no-strict to override energy type detection")
+        print(f"[ERREUR] Type d'énergie incorrect : {e}")
+        print("[CONSEIL] Essayez d'utiliser --no-strict pour ignorer la détection du type d'énergie")
         sys.exit(2)
     except EnergyTypeError as e:
-        print(f"[ERROR] Paramètre: {e}")
+        print(f"[ERREUR] Paramètre : {e}")
         sys.exit(3)
     except FileNotFoundError as e:
-        print(f"[ERROR] File not found: {e}")
+        print(f"[ERREUR] Fichier introuvable : {e}")
         sys.exit(4)
     except ValueError as e:
-        print(f"[ERROR] Invalid input: {e}")
+        print(f"[ERREUR] Entrée invalide : {e}")
         sys.exit(5)
     except Exception as e:
-        print(f"[ERROR] Unexpected error: {e}")
+        print(f"[ERREUR] Erreur inattendue : {e}")
         import traceback
 
         traceback.print_exc()

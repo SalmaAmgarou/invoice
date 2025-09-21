@@ -42,14 +42,14 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 # App setup
 # ————————————————————————————————————————————————————————————————
 
-def _unauth(msg="Unauthorized"):
+def _unauth(msg="Non autorisé"):
     # don't leak details
     raise HTTPException(status_code=401, detail=msg)
 
 async def require_api_key(x_api_key: str = Security(api_key_header)):
     # Require at least one configured key
     if not Config.API_KEY:
-        raise HTTPException(status_code=500, detail="Server auth misconfigured")
+        raise HTTPException(status_code=500, detail="Configuration d'authentification du serveur incorrecte")
     if not x_api_key:
         _unauth()
     ok = any(hmac.compare_digest(x_api_key, k) for k in Config.API_KEY)
@@ -107,7 +107,7 @@ async def process_pdf_invoice(
     and anonymous reports as Base64-encoded strings in a JSON object.
     """
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF is allowed.")
+        raise HTTPException(status_code=400, detail="Type de fichier invalide. Seuls les PDF sont autorisés.")
 
     # Use a temporary file to pass its path to your processing logic without saving permanently.
     # The 'with' block ensures the file is automatically deleted afterward.
@@ -121,7 +121,7 @@ async def process_pdf_invoice(
             if total > Config.MAX_CONTENT_LENGTH:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"PDF too large (> {Config.MAX_CONTENT_LENGTH} bytes)"
+                    detail=f"PDF trop volumineux (> {Config.MAX_CONTENT_LENGTH} octets)"
                 )
             tmp_file.write(chunk)
         tmp_file.seek(0)  # Go back to the start of the file
@@ -138,9 +138,9 @@ async def process_pdf_invoice(
         except (EnergyTypeError, ValueError) as e:
             raise HTTPException(status_code=400, detail=str(e))
         except EnergyTypeMismatchError as e:
-            raise HTTPException(status_code=422, detail=f"Energy type mismatch: {e}")
+            raise HTTPException(status_code=422, detail=f"Incompatibilité de type d'énergie : {e}")
         except Exception:
-            raise HTTPException(status_code=500, detail="Internal Server Error")
+            raise HTTPException(status_code=500, detail="Erreur interne du serveur")
     # Base64-encode the raw bytes to safely include them in the JSON response
     non_anon_b64 = base64.b64encode(non_anon_bytes).decode('utf-8')
     anon_b64 = base64.b64encode(anon_bytes).decode('utf-8')
@@ -169,20 +169,20 @@ async def process_image_invoices(
     the generated reports as Base64-encoded strings.
     """
     if not files:
-        raise HTTPException(status_code=400, detail="At least one image file is required.")
+        raise HTTPException(status_code=400, detail="Au moins un fichier image est requis.")
     # Validate each filename suffix up front
     for f in files:
         suffix = Path(f.filename or "").suffix.lower()
         if suffix not in ALLOWED_IMAGE_SUFFIXES:
-            raise HTTPException(status_code=400, detail=f"Unsupported image extension: {suffix or 'unknown'}")
+            raise HTTPException(status_code=400, detail=f"Extension d'image non supportée : {suffix or 'inconnue'}")
     if len(files) > 8:
-        raise HTTPException(status_code=400, detail="At most 8 images are allowed per invoice.")
+        raise HTTPException(status_code=400, detail="Au maximum 8 images sont autorisées par facture.")
     # valider mime type
     for f in files:
         if not f.content_type or not f.content_type.lower().startswith(("image/",)):
-            raise HTTPException(status_code=400, detail=f"Unsupported content type: {f.content_type or 'unknown'}")
+            raise HTTPException(status_code=400, detail=f"Type de contenu non supporté : {f.content_type or 'inconnu'}")
     if len(files) > 8:
-        raise HTTPException(status_code=400, detail="At most 8 images are allowed per invoice.")
+        raise HTTPException(status_code=400, detail="Au maximum 8 images sont autorisées par facture.")
 
     temp_files_paths = []
     try:
@@ -202,7 +202,7 @@ async def process_image_invoices(
                         os.remove(tmp_path)  # cleanup partial
                         raise HTTPException(
                             status_code=413,
-                            detail=f"Image too large (> {MAX_IMAGE_BYTES} bytes)"
+                            detail=f"Image trop volumineuse (> {MAX_IMAGE_BYTES} octets)"
                         )
                     tmp_file.write(chunk)
                 tmp_file.flush()
@@ -217,7 +217,7 @@ async def process_image_invoices(
             strict=strict,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An unexpected error during image processing: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue lors du traitement des images : {e}")
     finally:
         # Crucial cleanup step: ensure all temporary image files are deleted
         for path in temp_files_paths:
