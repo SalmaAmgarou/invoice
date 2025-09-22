@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 # --- OpenAI ---
 from openai import OpenAI
-from config import Config
+from core.config import Config
 import re
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
 import io
@@ -1466,7 +1466,7 @@ def normalize_pixtral_json(data: dict) -> dict:
             m = re.search(r"\d+", e["puissance_kVA"])
             e["puissance_kVA"] = int(m.group(0)) if m else None
 
-        # Add legacy key your pipeline expects
+        # Add legacy key  pipeline expects
         if e.get("conso_kwh") is None and e.get("conso_kwh_total") is not None:
             e["conso_kwh"] = e["conso_kwh_total"]
 
@@ -1498,7 +1498,7 @@ def pixtral_extract_invoice(image_paths: List[str],
     if energy_hint and energy_hint != "auto":
         content.insert(0, {"type": "text", "text": f"Type attendu: {energy_hint}."})
 
-    # Reuse your existing helper to embed as data URLs
+    # Reuse  existing helper to embed as data URLs
     for p in image_paths:
         content.append({"type": "image_url", "image_url": _image_to_data_url(p)})
 

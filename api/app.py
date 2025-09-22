@@ -24,6 +24,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from core.config import Config
+import uuid, os
+from pathlib import Path
+from typing import Optional
+from celery.result import AsyncResult
+from pydantic import BaseModel
+from celery_app import celery
+# import tasks
+from tasks import process_pdf_task, process_images_task
 from services.reporting.engine import (
      process_invoice_file,
      process_image_files,
@@ -33,7 +41,7 @@ from services.reporting.engine import (
 
 ALLOWED_IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
 
-# Use your existing app limit as a per-file guard (bytes)
+# Use  existing app limit as a per-file guard (bytes)
 MAX_IMAGE_BYTES = Config.MAX_CONTENT_LENGTH
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -41,6 +49,39 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 # ————————————————————————————————————————————————————————————————
 # App setup
 # ————————————————————————————————————————————————————————————————
+
+class JobEnqueueResponse(BaseModel):
+    task_id: str
+
+class JobStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    result: Optional[ProcessResponse] = None  # reuse  existing response schema
+
+def _save_upload_for_worker(upload: UploadFile, *, allowed_suffix: set[str], max_bytes: int, dest_dir: str) -> str:
+    name = upload.filename or ""
+    suffix = Path(name).suffix.lower()
+    if suffix not in allowed_suffix:
+        raise HTTPException(status_code=400, detail=f"Unsupported extension: {suffix or 'unknown'}")
+
+    os.makedirs(dest_dir, exist_ok=True)
+    file_id = f"{uuid.uuid4().hex}{suffix}"
+    out_path = os.path.join(dest_dir, file_id)
+
+    total = 0
+    with open(out_path, "wb") as w:
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                w.close()
+                os.remove(out_path)
+                raise HTTPException(status_code=413, detail=f"File too large (> {max_bytes} bytes)")
+            w.write(chunk)
+    return out_path
+
 
 def _unauth(msg="Non autorisé"):
     # don't leak details
@@ -61,7 +102,7 @@ app = FastAPI(
     description="An API to process energy invoices and generate comparison reports."
 )
 
-# CORS (adjust for your frontend origins in production)
+# CORS (adjust for  frontend origins in production)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -109,7 +150,7 @@ async def process_pdf_invoice(
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Type de fichier invalide. Seuls les PDF sont autorisés.")
 
-    # Use a temporary file to pass its path to your processing logic without saving permanently.
+    # Use a temporary file to pass its path to  processing logic without saving permanently.
     # The 'with' block ensures the file is automatically deleted afterward.
     with tempfile.NamedTemporaryFile(delete=True, suffix=".pdf") as tmp_file:
         total = 0
@@ -127,7 +168,7 @@ async def process_pdf_invoice(
         tmp_file.seek(0)  # Go back to the start of the file
 
         try:
-            # Call your modified sync function (which now returns bytes) in a worker thread
+            # Call  modified sync function (which now returns bytes) in a worker thread
             non_anon_bytes, anon_bytes = await run_in_threadpool(
                 process_invoice_file,
                 tmp_file.name,
@@ -208,7 +249,7 @@ async def process_image_invoices(
                 tmp_file.flush()
                 temp_files_paths.append(tmp_file.name)
 
-        # Call your modified sync function with the list of temporary image paths
+        # Call  modified sync function with the list of temporary image paths
         non_anon_bytes, anon_bytes = await run_in_threadpool(
             process_image_files,
             temp_files_paths,
@@ -231,3 +272,82 @@ async def process_image_invoices(
         non_anonymous_report_base64=non_anon_b64,
         anonymous_report_base64=anon_b64,
     )
+
+@app.post("/v1/jobs/pdf", response_model=JobEnqueueResponse, summary="Enqueue PDF invoice processing")
+async def enqueue_pdf_job(
+    file: UploadFile = File(...),
+    energy: EnergyMode = Form("auto"),
+    confidence_min: float = Form(0.5, ge=0.0, le=1.0),
+    strict: bool = Form(True),
+    webhook_url: Optional[str] = Form(None),
+    _auth = Depends(require_api_key),
+):
+    # persist to shared folder for the worker
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF is allowed.")
+
+    os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
+    path = _save_upload_for_worker(
+        file, allowed_suffix={".pdf"}, max_bytes=Config.MAX_CONTENT_LENGTH, dest_dir=Config.UPLOAD_FOLDER
+    )  # MAX_CONTENT_LENGTH comes from  config. :contentReference[oaicite:8]{index=8}
+
+    task = process_pdf_task.delay(path, energy, confidence_min, strict, webhook_url)
+    return JobEnqueueResponse(task_id=task.id)
+
+@app.post("/v1/jobs/images", response_model=JobEnqueueResponse, summary="Enqueue image invoice processing")
+async def enqueue_images_job(
+    files: List[UploadFile] = File(...),
+    energy: EnergyMode = Form("auto"),
+    confidence_min: float = Form(0.5, ge=0.0, le=1.0),
+    strict: bool = Form(True),
+    webhook_url: Optional[str] = Form(None),
+    _auth = Depends(require_api_key),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one image is required.")
+    if len(files) > 8:
+        raise HTTPException(status_code=400, detail="At most 8 images are allowed per invoice.")
+
+    os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
+    paths = []
+    try:
+        for f in files:
+            paths.append(_save_upload_for_worker(
+                f, allowed_suffix={'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'},
+                max_bytes=Config.MAX_CONTENT_LENGTH, dest_dir=Config.UPLOAD_FOLDER
+            ))
+    except Exception:
+        # clean partial
+        for p in paths:
+            try: os.remove(p)
+            except Exception: pass
+        raise
+
+    task = process_images_task.delay(paths, energy, confidence_min, strict, webhook_url)
+    return JobEnqueueResponse(task_id=task.id)
+
+
+@app.get("/v1/jobs/{task_id}", response_model=JobStatusResponse, summary="Get job status/result")
+def job_status(task_id: str, _auth = Depends(require_api_key)):
+    res = AsyncResult(task_id, app=celery)
+    status = res.status  # PENDING / STARTED / RETRY / FAILURE / SUCCESS
+    body = {"task_id": task_id, "status": status}
+    if res.successful():
+        # matches ProcessResponse shape  clients already expect in sync flow
+        body["result"] = res.result
+    elif res.failed():
+        # optional: expose reason
+        raise HTTPException(status_code=500, detail="Job failed")
+    return body
+
+
+@app.get("/v1/jobs/{task_id}", response_model=JobStatusResponse)
+def job_status(task_id: str, _auth = Depends(require_api_key)):
+    res = AsyncResult(task_id, app=celery)
+    status = res.status  # PENDING / STARTED / RETRY / FAILURE / SUCCESS
+    body = {"task_id": task_id, "status": status}
+    if res.successful():
+        body["result"] = res.result  # <- this is the dict the task returned
+    elif res.failed():
+        raise HTTPException(status_code=500, detail="Job failed")
+    return body

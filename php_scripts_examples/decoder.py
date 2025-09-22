@@ -3,7 +3,7 @@ import json
 import base64
 
 # --- Configuration ---
-# The name of the JSON file you saved from your curl command
+# The name of the JSON file  saved from  curl command
 INPUT_JSON_FILE = "decoder/response_pdf.json"
 
 # --- Script ---

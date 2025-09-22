@@ -17,13 +17,6 @@ class Config:
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "uploads")
     REPORTS_FOLDER = os.getenv("REPORTS_FOLDER", "reports")
     REPORTS_INTERNAL_FOLDER = os.getenv("REPORTS_INTERNAL_FOLDER", "reports_internal")
-
-    # Email (Mailtrap for testing)
-    SMTP_HOST = os.getenv("SMTP_HOST", "sandbox.smtp.mailtrap.io")
-    SMTP_PORT = int(os.getenv("SMTP_PORT", "2525"))
-    SMTP_USERNAME = os.getenv("SMTP_USERNAME", "1c01943ecbf425")
-    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "77676f9f6edf65")
-
     # OCR
     TESSERACT_CMD = os.getenv("TESSERACT_CMD", "tesseract")  # Path to tesseract executable
 
@@ -42,3 +35,10 @@ class Config:
         folders = [Config.UPLOAD_FOLDER, Config.REPORTS_FOLDER, Config.REPORTS_INTERNAL_FOLDER]
         for folder in folders:
             os.makedirs(folder, exist_ok=True)
+
+    # Celery / Queue
+    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+    CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
+    CELERY_RESULT_EXPIRES = int(os.getenv("CELERY_RESULT_EXPIRES", "86400"))  # 24h
+    CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "600"))  # 10 min
+    CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "540"))
