@@ -26,22 +26,47 @@ def _post_webhook(url: str, payload: dict, task_id: str):
         sig = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
         headers["X-Webhook-Signature"] = sig
 
-    # raise_for_status => non-2xx triggers Celery autoretry
+    # non-2xx => raises => Celery autoretry kicks in
     with httpx.Client(timeout=15) as cli:
         r = cli.post(url, content=body, headers=headers)
         r.raise_for_status()
 
 @celery.task(
     bind=True,
-    autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, retry_kwargs={'max_retries': 6},
+    autoretry_for=(Exception,),
+    retry_backoff=True, retry_jitter=True, retry_kwargs={'max_retries': 6},
     name="process_pdf_task",
 )
-def process_pdf_task(self, file_path: str, energy: str, confidence_min: float, strict: bool,
-                     webhook_url: Optional[str] = None) -> dict:
+def process_pdf_task(
+    self,
+    file_path: str,
+    energy: str,
+    confidence_min: float,
+    strict: bool,
+    webhook_url: Optional[str] = None,
+    # optional context (pass-through to webhook/DB):
+    user_id: Optional[int] = None,
+    invoice_id: Optional[int] = None,
+    external_ref: Optional[str] = None,
+    source_kind: Optional[str] = "pdf",
+) -> dict:
     non_anon, anon = process_invoice_file(file_path, energy_mode=energy,
                                           confidence_min=confidence_min, strict=strict)
-    result = {"non_anonymous_report_base64": _b64(non_anon),
-              "anonymous_report_base64": _b64(anon)}
+
+    result = {
+        "non_anonymous_report_base64": _b64(non_anon),
+        "anonymous_report_base64": _b64(anon),
+        # optional integrity metadata (handy for DB/audits)
+        "non_anonymous_size": len(non_anon),
+        "anonymous_size": len(anon),
+        "non_anonymous_sha256": hashlib.sha256(non_anon).hexdigest(),
+        "anonymous_sha256": hashlib.sha256(anon).hexdigest(),
+        # pass-through context (if the enqueue provided these)
+        "user_id": user_id,
+        "invoice_id": invoice_id,
+        "external_ref": external_ref,
+        "source_kind": source_kind or "pdf",
+    }
     try:
         if webhook_url:
             _post_webhook(webhook_url, result, task_id=self.request.id)
@@ -51,15 +76,38 @@ def process_pdf_task(self, file_path: str, energy: str, confidence_min: float, s
 
 @celery.task(
     bind=True,
-    autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, retry_kwargs={'max_retries': 6},
+    autoretry_for=(Exception,),
+    retry_backoff=True, retry_jitter=True, retry_kwargs={'max_retries': 6},
     name="process_images_task",
 )
-def process_images_task(self, file_paths: List[str], energy: str, confidence_min: float, strict: bool,
-                        webhook_url: Optional[str] = None) -> dict:
+def process_images_task(
+    self,
+    file_paths: List[str],
+    energy: str,
+    confidence_min: float,
+    strict: bool,
+    webhook_url: Optional[str] = None,
+    # optional context:
+    user_id: Optional[int] = None,
+    invoice_id: Optional[int] = None,
+    external_ref: Optional[str] = None,
+    source_kind: Optional[str] = "images",
+) -> dict:
     non_anon, anon = process_image_files(file_paths, energy_mode=energy,
                                          confidence_min=confidence_min, strict=strict)
-    result = {"non_anonymous_report_base64": _b64(non_anon),
-              "anonymous_report_base64": _b64(anon)}
+
+    result = {
+        "non_anonymous_report_base64": _b64(non_anon),
+        "anonymous_report_base64": _b64(anon),
+        "non_anonymous_size": len(non_anon),
+        "anonymous_size": len(anon),
+        "non_anonymous_sha256": hashlib.sha256(non_anon).hexdigest(),
+        "anonymous_sha256": hashlib.sha256(anon).hexdigest(),
+        "user_id": user_id,
+        "invoice_id": invoice_id,
+        "external_ref": external_ref,
+        "source_kind": source_kind or "images",
+    }
     try:
         if webhook_url:
             _post_webhook(webhook_url, result, task_id=self.request.id)

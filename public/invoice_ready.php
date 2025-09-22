@@ -1,136 +1,203 @@
 <?php
-declare(strict_types=1);
+// ============================================================================
+// invoice_ready.php — Récepteur de webhook (POST) pour recevoir 2 PDFs en Base64
+// ============================================================================
+//
+// RÔLE (côté PHP) :
+//   - Recevoir l'appel POST envoyé par le worker Python à la fin du traitement.
+//   - Vérifier (optionnel) un token Bearer et/ou une signature HMAC.
+//   - Décoder les 2 PDFs (non anonymisé + anonymisé) depuis le JSON reçu.
+//   - (Aujourd'hui) Écrire les fichiers sur disque dans ../uploads/  (POC/dev).
+//   - (Demain) Remplacer l'écriture sur disque par un UPSERT en base (MySQL/PG).
+//
+// CONTRAT D’ENTRÉE (ce que le worker envoie) :
+//   Headers :
+//     - X-Task-Id: <uuid>                (obligatoire ; sert d’ID idempotent)
+//     - Authorization: Bearer <TOKEN>    (optionnel mais recommandé)
+//     - X-Webhook-Signature: <HEX>       (optionnel ; HMAC-SHA256 du body)
+//
+//   Body JSON :
+//   {
+//     "non_anonymous_report_base64": "<base64 du PDF non anonymisé>",
+//     "anonymous_report_base64":     "<base64 du PDF anonymisé>"
+//   }
+//
+// VARIABLES D’ENV À DÉFINIR (selon votre infra) :
+//   - WEBHOOK_TOKEN   : si défini => on exige Authorization: Bearer <WEBHOOK_TOKEN>
+//   - WEBHOOK_SECRET  : si défini => on exige X-Webhook-Signature = HMAC_SHA256(body, secret)
+//
+//   (Pour la future persistance en DB, voir le BLOC EXEMPLE PDO plus bas)
+//   - DB_DSN   : ex MySQL  -> "mysql:host=127.0.0.1;port=3306;dbname=invoices;charset=utf8mb4"
+//               ex PGSQL   -> "pgsql:host=127.0.0.1;port=5432;dbname=invoices"
+//   - DB_USER  : utilisateur DB
+//   - DB_PASS  : mot de passe DB
+//
+// RÉPONSES :
+//   - 200 {"ok":true}                         => fichiers bien reçus/écrits (ou DB ok)
+//   - 400 {"ok":false,"error":"bad request"}  => pas de taskId / body invalide
+//   - 401 {"ok":false,"error":"unauthorized"} => mauvais Bearer
+//   - 401 {"ok":false,"error":"bad signature"}=> HMAC invalide
+//
+// IMPORTANT EN DEV :
+//   - Ce script ÉCRIT dans ../uploads/  -> assurez-vous que le dossier existe :
+//       mkdir -p /chemin/vers/public/../uploads && chmod 775 …
+//   - Si vous voyez “Failed to open stream: No such file or directory”, c’est que
+//     le dossier n’existe pas ou n’est pas accessible en écriture.
+//
+// CHECKLIST RAPIDE POUR L’ÉQUIPE :
+//   [ ] Exposer cette route en POST (ex. /internal/invoice-ready) derrière HTTPS.
+//   [ ] Définir WEBHOOK_TOKEN (recommandé) et, si souhaité, WEBHOOK_SECRET (HMAC).
+//   [ ] Créer le dossier ../uploads en dev (ou activer la partie DB plus bas).
+//   [ ] Retourner 200 rapidement (<1–2s). Aucune logique lourde ici.
+//   [ ] En prod : remplacez l’écriture sur disque par un UPSERT DB (voir exemple).
+// ============================================================================
 
-/**
- * ---------------------------------------------------------------------------
- *  invoice_ready.php — Récepteur de webhook (POST) qui enregistre en DB
- * ---------------------------------------------------------------------------
- *
- * Rôle :
- *   - Recevoir le POST du worker Python (résultat JSON avec 2 PDFs en Base64)
- *   - Auth facultative : Authorization: Bearer <WEBHOOK_TOKEN>
- *   - Signature facultative : X-Webhook-Signature = HMAC-SHA256(body, WEBHOOK_SECRET)
- *   - Idempotence : dédupliqué par X-Task-Id (clé primaire en DB)
- *   - Persister en base (MySQL ou PostgreSQL) via PDO avec UPSERT
- *
- * Contrat d’entrée (envoyé par le worker) :
- *   Headers :
- *     - X-Task-Id: <uuid>            (obligatoire)
- *     - Authorization: Bearer ...    (optionnel mais recommandé)
- *     - X-Webhook-Signature: <hex>   (optionnel si HMAC activé)
- *   Body JSON :
- *     {
- *       "non_anonymous_report_base64": "<base64>",
- *       "anonymous_report_base64": "<base64>"
- *     }
- *
- * Variables d’environnement attendues (côté PHP) :
- *   - DB_DSN   : ex MySQL  -> "mysql:host=127.0.0.1;port=3306;dbname=invoices;charset=utf8mb4"
- *                ex PgSQL  -> "pgsql:host=127.0.0.1;port=5432;dbname=invoices"
- *   - DB_USER  : utilisateur DB
- *   - DB_PASS  : mot de passe DB
- *   - WEBHOOK_TOKEN   : si défini, on exige Authorization: Bearer <token>
- *   - WEBHOOK_SECRET  : si défini, on exige X-Webhook-Signature (HMAC du body)
- *
- * Réponses :
- *   - 200 {"ok":true,"task_id":"...","driver":"mysql|pgsql"}
- *   - 400 {"ok":false,"error":"bad request|invalid json"}
- *   - 401 {"ok":false,"error":"unauthorized|bad signature"}
- *   - 422 {"ok":false,"error":"invalid base64"}
- *   - 500 {"ok":false,"error":"db not configured|db error"}
- */
 
-// ------------------------ Helpers de réponse JSON ----------------------------
-function respond(int $code, array $payload): void {
-    http_response_code($code);
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-    exit;
-}
+// -----------------------------------------------------------------------------
+// Lecture du corps de la requête (JSON brut) et de l'ID de tâche
+// -----------------------------------------------------------------------------
+$raw = file_get_contents('php://input');
+$taskId = $_SERVER['HTTP_X_TASK_ID'] ?? null;
 
-// ----------------------- 1) Lecture headers & body ---------------------------
-$raw    = file_get_contents('php://input') ?: '';
-$taskId = $_SERVER['HTTP_X_TASK_ID'] ?? ($_GET['task_id'] ?? null);
-$auth   = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-$sig    = $_SERVER['HTTP_X_WEBHOOK_SIGNATURE'] ?? '';
-
-if (!$taskId || $raw === '') {
-    respond(400, ['ok' => false, 'error' => 'bad request']);
-}
-// Nettoyage minimal pour usage en logs/erreurs
-$taskId = preg_replace('/[^a-zA-Z0-9._-]+/', '_', (string)$taskId);
-
-// ----------------------- 2) Auth Bearer (optionnelle) ------------------------
+// -----------------------------------------------------------------------------
+// Authentification simple par Bearer (facultative)
+//   - Si WEBHOOK_TOKEN est défini côté serveur, on exige "Authorization: Bearer <token>"
+// -----------------------------------------------------------------------------
+$auth = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
 $token = getenv('WEBHOOK_TOKEN') ?: '';
-if ($token !== '') {
-    if (!hash_equals("Bearer {$token}", $auth)) {
-        respond(401, ['ok' => false, 'error' => 'unauthorized']);
-    }
+if ($token && $auth !== "Bearer $token") {
+  http_response_code(401); echo '{"ok":false,"error":"unauthorized"}'; exit;
 }
 
-// ----------------------- 3) HMAC (optionnelle) -------------------------------
+// -----------------------------------------------------------------------------
+// Vérification HMAC (facultative)
+//   - Si WEBHOOK_SECRET est défini, on exige X-Webhook-Signature égal au
+//     HMAC-SHA256(body, WEBHOOK_SECRET). Cela assure l'intégrité du message.
+// -----------------------------------------------------------------------------
 $secret = getenv('WEBHOOK_SECRET') ?: '';
-if ($secret !== '') {
-    $expected = hash_hmac('sha256', $raw, $secret);
-    if (!hash_equals($expected, $sig)) {
-        respond(401, ['ok' => false, 'error' => 'bad signature']);
+if ($secret) {
+  $sig = $_SERVER['HTTP_X_WEBHOOK_SIGNATURE'] ?? '';
+  $expected = hash_hmac('sha256', $raw, $secret);
+  if (!hash_equals($expected, $sig)) {
+    http_response_code(401); echo '{"ok":false,"error":"bad signature"}'; exit;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Parsing du JSON reçu et contrôle de présence de X-Task-Id
+// -----------------------------------------------------------------------------
+$payload = json_decode($raw, true);
+if (!$taskId || !is_array($payload)) {
+  http_response_code(400); echo '{"ok":false,"error":"bad request"}'; exit;
+}
+
+// -----------------------------------------------------------------------------
+// Décodage Base64 -> octets binaires (2 PDFs)
+//   - $nonAnon : PDF non anonymisé
+//   - $anon    : PDF anonymisé
+// -----------------------------------------------------------------------------
+$nonAnon = base64_decode($payload['non_anonymous_report_base64'] ?? '', true);
+$anon    = base64_decode($payload['anonymous_report_base64'] ?? '', true);
+
+// -----------------------------------------------------------------------------
+// PERSISTENCE ACTUELLE (POC/DEV) : ÉCRITURE SUR DISQUE
+//   - Le nom de fichier inclut le taskId pour l'idempotence : si le webhook est
+//     re-livré, on écrase les mêmes fichiers.
+//   - Dossier cible : ../uploads  (par rapport à /public)
+//   - ⚠️ Assurez-vous que ../uploads existe et est accessible en écriture.
+// -----------------------------------------------------------------------------
+
+// Idempotent upsert by task_id (pseudo DB)
+// TODO: replace with your DB call (MySQL/Postgres)
+file_put_contents(__DIR__."/../uploads/{$taskId}.nonanon.pdf", $nonAnon);
+file_put_contents(__DIR__."/../uploads/{$taskId}.anon.pdf", $anon);
+
+// -----------------------------------------------------------------------------
+// Réponse HTTP 200 (OK). Le client n’a pas besoin d’autre chose.
+// -----------------------------------------------------------------------------
+http_response_code(200);
+header('Content-Type: application/json');
+echo '{"ok":true}';
+
+
+// ============================================================================
+// BLOC EXEMPLE — PERSISTENCE EN BASE (MySQL/PostgreSQL) AVEC PDO (COMMENTÉ)
+// ============================================================================
+//
+// ➜ Objectif : remplacer les 2 file_put_contents(...) ci-dessus par un UPSERT DB.
+// ➜ Comment faire :
+//    1) Décommentez la fonction save_reports_to_db(...) ci-dessous.
+//    2) Décommentez l’appel juste après le décodage Base64 (et commentez l’écriture fichier).
+//    3) Assurez-vous d’avoir installé l’extension PDO correspondante :
+//         - MySQL : pdo_mysql   (Ubuntu : sudo apt install php8.x-mysql)
+//         - PGSQL : pdo_pgsql   (Ubuntu : sudo apt install php8.x-pgsql)
+//    4) Exportez les variables DB_DSN / DB_USER / DB_PASS avant de lancer le serveur.
+//
+//    SCHÉMA MINIMAL (une table unique façon “cache de résultats”):
+//      MySQL :
+//        CREATE TABLE invoice_jobs (
+//          task_id            VARCHAR(64) PRIMARY KEY,
+//          status             VARCHAR(16) NOT NULL,
+//          non_anonymous_pdf  LONGBLOB    NOT NULL,
+//          anonymous_pdf      LONGBLOB    NOT NULL,
+//          created_at         TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+//          completed_at       TIMESTAMP   NULL
+//        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+//
+//      PostgreSQL :
+//        CREATE TABLE public.invoice_jobs (
+//          task_id            text PRIMARY KEY,
+//          status             text   NOT NULL,
+//          non_anonymous_pdf  bytea  NOT NULL,
+//          anonymous_pdf      bytea  NOT NULL,
+//          created_at         timestamptz NOT NULL DEFAULT now(),
+//          completed_at       timestamptz NULL
+//        );
+//
+//    NOTE : En production, vous aurez souvent un modèle plus riche (users, invoices,
+//           jobs, reports, audit_events). Ce bloc montre le plus simple possible.
+//
+// ----------------------------------------------------------------------------
+// EXEMPLE D’APPEL (à mettre à la place des file_put_contents) :
+//
+//    // save_reports_to_db($taskId, $nonAnon, $anon);   // <— décommentez ceci
+//
+// ----------------------------------------------------------------------------
+// EXEMPLE D’IMPLÉMENTATION PDO (commentée) :
+//
+/*
+function save_reports_to_db(string $taskId, string $nonAnonBytes, string $anonBytes): void {
+    // 0) Récupérer la configuration DB (depuis l’environnement)
+    $dsn  = getenv('DB_DSN')  ?: '';
+    $user = getenv('DB_USER') ?: '';
+    $pass = getenv('DB_PASS') ?: '';
+
+    if ($dsn === '') {
+        http_response_code(500);
+        header('Content-Type: application/json');
+        echo json_encode(['ok'=>false,'error'=>'db not configured']);
+        exit;
     }
-}
 
-// ----------------------- 4) Parsing JSON ------------------------------------
-try {
-    /** @var array<string,mixed> $payload */
-    $payload = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
-} catch (Throwable $e) {
-    respond(400, ['ok' => false, 'error' => 'invalid json']);
-}
+    // 1) Connexion PDO (erreurs en exceptions)
+    try {
+        $pdo = new PDO($dsn, $user, $pass, [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES   => false,
+        ]);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        header('Content-Type: application/json');
+        echo json_encode(['ok'=>false,'error'=>'db connect failed']);
+        exit;
+    }
 
-// ----------------------- 5) Décodage Base64 -> bytes -------------------------
-$nonAnonB64 = (string)($payload['non_anonymous_report_base64'] ?? '');
-$anonB64    = (string)($payload['anonymous_report_base64'] ?? '');
+    // 2) Déterminer le driver (mysql | pgsql) pour choisir la syntaxe UPSERT
+    $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
 
-$nonAnon = base64_decode($nonAnonB64, true);
-$anon    = base64_decode($anonB64, true);
-
-if ($nonAnon === false || $anon === false) {
-    respond(422, ['ok' => false, 'error' => 'invalid base64']);
-}
-
-// ----------------------- 6) Connexion PDO (MySQL/Postgres) -------------------
-$dsn  = getenv('DB_DSN')  ?: '';
-$user = getenv('DB_USER') ?: '';
-$pass = getenv('DB_PASS') ?: '';
-
-if ($dsn === '') {
-    respond(500, ['ok' => false, 'error' => 'db not configured']);
-}
-
-try {
-    $pdo = new PDO($dsn, $user, $pass, [
-        PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        PDO::ATTR_EMULATE_PREPARES   => false, // vrais prepares, utile pour les BLOB/bytea
-    ]);
-} catch (Throwable $e) {
-    respond(500, ['ok' => false, 'error' => 'db error: connect failed']);
-}
-
-$driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME); // "mysql" ou "pgsql"
-
-// ----------------------- 7) UPSERT selon le driver ---------------------------
-/**
- * Table visée : invoice_jobs (voir DDL en bas)
- * Colonnes minimales :
- *   - task_id (PK)
- *   - status  (texte)
- *   - non_anonymous_pdf (BLOB/LONGBLOB ou BYTEA)
- *   - anonymous_pdf     (BLOB/LONGBLOB ou BYTEA)
- *   - completed_at (timestamp)
- */
-
-if ($driver === 'mysql') {
-    // MySQL/MariaDB — nécessite une PK ou un index unique sur task_id
-    $sql = <<<SQL
+    if ($driver === 'mysql') {
+        $sql = <<<SQL
 INSERT INTO invoice_jobs (task_id, status, non_anonymous_pdf, anonymous_pdf, completed_at)
 VALUES (:task_id, 'SUCCESS', :non_anon, :anon, NOW())
 ON DUPLICATE KEY UPDATE
@@ -139,9 +206,8 @@ ON DUPLICATE KEY UPDATE
   anonymous_pdf     = VALUES(anonymous_pdf),
   completed_at      = VALUES(completed_at)
 SQL;
-} elseif ($driver === 'pgsql') {
-    // PostgreSQL — nécessite CONSTRAINT UNIQUE/PK sur task_id
-    $sql = <<<SQL
+    } elseif ($driver === 'pgsql') {
+        $sql = <<<SQL
 INSERT INTO invoice_jobs (task_id, status, non_anonymous_pdf, anonymous_pdf, completed_at)
 VALUES (:task_id, 'SUCCESS', :non_anon, :anon, NOW())
 ON CONFLICT (task_id) DO UPDATE SET
@@ -150,98 +216,44 @@ ON CONFLICT (task_id) DO UPDATE SET
   anonymous_pdf     = EXCLUDED.anonymous_pdf,
   completed_at      = EXCLUDED.completed_at
 SQL;
-} else {
-    respond(500, ['ok' => false, 'error' => 'unsupported driver: '.$driver]);
+    } else {
+        http_response_code(500);
+        header('Content-Type: application/json');
+        echo json_encode(['ok'=>false,'error'=>'unsupported driver']);
+        exit;
+    }
+
+    // 3) Exécution (idempotent sur task_id)
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->bindValue(':task_id', $taskId,    PDO::PARAM_STR);
+        $stmt->bindValue(':non_anon', $nonAnonBytes, PDO::PARAM_LOB);
+        $stmt->bindValue(':anon',     $anonBytes,    PDO::PARAM_LOB);
+        $stmt->execute();
+    } catch (Throwable $e) {
+        http_response_code(500);
+        header('Content-Type: application/json');
+        echo json_encode(['ok'=>false,'error'=>'db upsert failed']);
+        exit;
+    }
 }
+*/
+// ============================================================================
+//
+// TESTS RAPIDES (dev) :
+//   1) Lancer le serveur PHP dans le dossier du fichier :
+//        WEBHOOK_TOKEN='secret' php -S 127.0.0.1:8088 -t public
+//   2) Simuler un POST webhook :
+//        body='{"non_anonymous_report_base64":"Tk8=","anonymous_report_base64":"Tk8="}'
+//        curl -i -X POST http://127.0.0.1:8088/invoice_ready.php \
+//          -H "Content-Type: application/json" \
+//          -H "Authorization: Bearer secret" \
+//          -H "X-Task-Id: test-123" \
+//          -d "$body"
+//   3) Vérifier : deux fichiers test-123.nonanon.pdf / test-123.anon.pdf dans ../uploads
+//
+//   (Si vous activez la DB)
+//   - Assurez-vous d’avoir pdo_mysql OU pdo_pgsql (php -m | grep -Ei 'pdo|mysql|pgsql')
+//   - Exportez DB_DSN/DB_USER/DB_PASS puis décommentez save_reports_to_db(...)
+// ============================================================================
 
-try {
-    $stmt = $pdo->prepare($sql);
-    // task_id en texte
-    $stmt->bindValue(':task_id', $taskId, PDO::PARAM_STR);
-    // PDF en binaire – PARAM_LOB marche pour MySQL (BLOB) et PgSQL (bytea) en PDO
-    $stmt->bindValue(':non_anon', $nonAnon, PDO::PARAM_LOB);
-    $stmt->bindValue(':anon',     $anon,     PDO::PARAM_LOB);
-    $stmt->execute();
-} catch (Throwable $e) {
-    // Pour débug : error_log($e->getMessage());
-    respond(500, ['ok' => false, 'error' => 'db error: upsert failed']);
-}
-
-// ----------------------- 8) Réponse HTTP 200 -------------------------------
-respond(200, ['ok' => true, 'task_id' => $taskId, 'driver' => $driver]);
-
-/**
- * =======================================================================
- *  CHECKLIST pour l’équipe PHP (DB)
- * =======================================================================
- * ✅ Exposer cette route en POST (ex: /internal/invoice-ready) via HTTPS en prod
- * ✅ Définir les variables d’environnement :
- *      - DB_DSN, DB_USER, DB_PASS
- *      - WEBHOOK_TOKEN (recommandé) et/ou WEBHOOK_SECRET (HMAC)
- * ✅ Créer la table `invoice_jobs` (DDL ci-dessous) avec PK sur task_id
- * ✅ Vérifier que le worker envoie bien X-Task-Id + JSON avec les 2 champs Base64
- * ✅ Retourner 200 rapidement (≤ 1–2 s). Pas de logique lourde ici.
- * ✅ Idempotence : UPSERT par task_id (déjà géré par ce script)
- * ✅ Monitoring : garder un oeil sur les logs (erreurs DB, base64 invalide)
- *
- * -----------------------------------------------------------------------
- *  DDL MySQL (utf8mb4)
- * -----------------------------------------------------------------------
- * CREATE TABLE invoice_jobs (
- *   task_id            VARCHAR(64) PRIMARY KEY,
- *   status             VARCHAR(16) NOT NULL,
- *   non_anonymous_pdf  LONGBLOB    NOT NULL,
- *   anonymous_pdf      LONGBLOB    NOT NULL,
- *   created_at         TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
- *   completed_at       TIMESTAMP   NULL     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
- * ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
- *
- * -- Option : index additionnels si vous requêtez souvent par dates
- * -- CREATE INDEX idx_invoice_jobs_completed_at ON invoice_jobs (completed_at);
- *
- * -----------------------------------------------------------------------
- *  DDL PostgreSQL
- * -----------------------------------------------------------------------
- * CREATE TABLE public.invoice_jobs (
- *   task_id            text PRIMARY KEY,
- *   status             text        NOT NULL,
- *   non_anonymous_pdf  bytea       NOT NULL,
- *   anonymous_pdf      bytea       NOT NULL,
- *   created_at         timestamptz NOT NULL DEFAULT now(),
- *   completed_at       timestamptz NULL
- * );
- * -- Option : index sur completed_at
- * -- CREATE INDEX idx_invoice_jobs_completed_at ON public.invoice_jobs (completed_at);
- *
- * -----------------------------------------------------------------------
- *  TEST RAPIDE (sans le worker)
- * -----------------------------------------------------------------------
- * 1) Lancer le serveur PHP :
- *    DB_DSN='mysql:host=127.0.0.1;port=3306;dbname=invoices;charset=utf8mb4' \
- *    DB_USER='root' DB_PASS='root' \
- *    WEBHOOK_TOKEN='secret' \
- *    php -S 127.0.0.1:8088 -t public
- *
- * 2) Envoyer un POST factice :
- *    body='{"non_anonymous_report_base64":"Tk8=","anonymous_report_base64":"Tk8="}'
- *    curl -i -X POST http://127.0.0.1:8088/invoice_ready.php \
- *      -H "Content-Type: application/json" \
- *      -H "Authorization: Bearer secret" \
- *      -H "X-Task-Id: test-123" \
- *      -d "$body"
- *
- * 3) Vérifier en SQL que la ligne existe (et contient des octets) :
- *    -- MySQL : SELECT task_id, status, OCTET_LENGTH(non_anonymous_pdf) AS n1, OCTET_LENGTH(anonymous_pdf) AS n2 FROM invoice_jobs WHERE task_id='test-123';
- *    -- PgSQL : SELECT task_id, status, OCTET_LENGTH(non_anonymous_pdf) AS n1, OCTET_LENGTH(anonymous_pdf) AS n2 FROM invoice_jobs WHERE task_id='test-123';
- *
- * -----------------------------------------------------------------------
- *  REMARQUES
- * -----------------------------------------------------------------------
- * - Ce script n’a PAS changé la logique métier : il remplace l’écriture “fichier”
- *   par un UPSERT DB. Le contrat JSON côté worker/API reste identique.
- * - Pour de très gros volumes/fichiers, envisagez le stockage objet (S3/MinIO) :
- *   le worker enverra des URL au lieu des blobs (même squelette d’UPSERT).
- * - Si vous avez appliqué le patch Python proposant retry + X-Task-Id + HMAC,
- *   la livraison devient encore plus robuste (mais le présent handler fonctionne
- *   aussi sans HMAC/Bearer).
- */

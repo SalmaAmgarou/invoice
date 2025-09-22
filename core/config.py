@@ -5,13 +5,10 @@ load_dotenv()
 
 
 class Config:
-    # Database
-    DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://user:password@localhost/factures_db")
-
     # OpenAI
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     API_KEY = [s.strip() for s in os.getenv("API_KEY", "").split(",") if s.strip()]
-    ALLOWED_ORIGINS = [s.strip() for s in os.getenv("ALLOWED_ORIGINS", "").split(",") if s.strip()]
+    ALLOWED_ORIGINS = [s.strip() for s in os.getenv("ALLOWED_ORIGINS", "").split(",") if s.strip()] # A modifier et ajouter URL du frontend
 
     # File Storage
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "uploads")

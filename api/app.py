@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from celery_app import celery
 # import tasks
 from tasks import process_pdf_task, process_images_task
+from fastapi import Form
 from services.reporting.engine import (
      process_invoice_file,
      process_image_files,
@@ -105,7 +106,7 @@ app = FastAPI(
 # CORS (adjust for  frontend origins in production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=Config.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -280,7 +281,11 @@ async def enqueue_pdf_job(
     confidence_min: float = Form(0.5, ge=0.0, le=1.0),
     strict: bool = Form(True),
     webhook_url: Optional[str] = Form(None),
-    _auth = Depends(require_api_key),
+    # NEW: pass-through context
+    user_id: Optional[int] = Form(None),
+    invoice_id: Optional[int] = Form(None),
+    external_ref: Optional[str] = Form(None),
+    _auth=Depends(require_api_key),
 ):
     # persist to shared folder for the worker
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -291,8 +296,18 @@ async def enqueue_pdf_job(
         file, allowed_suffix={".pdf"}, max_bytes=Config.MAX_CONTENT_LENGTH, dest_dir=Config.UPLOAD_FOLDER
     )  # MAX_CONTENT_LENGTH comes from  config. :contentReference[oaicite:8]{index=8}
 
-    task = process_pdf_task.delay(path, energy, confidence_min, strict, webhook_url)
-    return JobEnqueueResponse(task_id=task.id)
+    task = process_pdf_task.apply_async(kwargs={
+        "file_path": path,
+        "energy": energy,
+        "confidence_min": confidence_min,
+        "strict": strict,
+        "webhook_url": webhook_url,
+        "user_id": user_id,
+        "invoice_id": invoice_id,
+        "external_ref": external_ref,
+        "source_kind": "pdf",
+    })
+    return {"task_id": task.id}
 
 @app.post("/v1/jobs/images", response_model=JobEnqueueResponse, summary="Enqueue image invoice processing")
 async def enqueue_images_job(
@@ -301,7 +316,10 @@ async def enqueue_images_job(
     confidence_min: float = Form(0.5, ge=0.0, le=1.0),
     strict: bool = Form(True),
     webhook_url: Optional[str] = Form(None),
-    _auth = Depends(require_api_key),
+    user_id: Optional[int] = Form(None),
+    invoice_id: Optional[int] = Form(None),
+    external_ref: Optional[str] = Form(None),
+    _auth=Depends(require_api_key),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="At least one image is required.")
@@ -323,22 +341,19 @@ async def enqueue_images_job(
             except Exception: pass
         raise
 
-    task = process_images_task.delay(paths, energy, confidence_min, strict, webhook_url)
-    return JobEnqueueResponse(task_id=task.id)
+    task = process_images_task.apply_async(kwargs={
+        "file_paths": paths,  # <— list of image paths
+        "energy": energy,
+        "confidence_min": confidence_min,
+        "strict": strict,
+        "webhook_url": webhook_url,
+        "user_id": user_id,
+        "invoice_id": invoice_id,
+        "external_ref": external_ref,
+        "source_kind": "images",
+    })
+    return {"task_id": task.id}
 
-
-@app.get("/v1/jobs/{task_id}", response_model=JobStatusResponse, summary="Get job status/result")
-def job_status(task_id: str, _auth = Depends(require_api_key)):
-    res = AsyncResult(task_id, app=celery)
-    status = res.status  # PENDING / STARTED / RETRY / FAILURE / SUCCESS
-    body = {"task_id": task_id, "status": status}
-    if res.successful():
-        # matches ProcessResponse shape  clients already expect in sync flow
-        body["result"] = res.result
-    elif res.failed():
-        # optional: expose reason
-        raise HTTPException(status_code=500, detail="Job failed")
-    return body
 
 
 @app.get("/v1/jobs/{task_id}", response_model=JobStatusResponse)
