@@ -33,6 +33,7 @@ from celery_app import celery
 # import tasks
 from tasks import process_pdf_task, process_images_task
 from fastapi import Form
+import logging, traceback
 from services.reporting.engine import (
      process_invoice_file,
      process_image_files,
@@ -181,7 +182,8 @@ async def process_pdf_invoice(
             raise HTTPException(status_code=400, detail=str(e))
         except EnergyTypeMismatchError as e:
             raise HTTPException(status_code=422, detail=f"Incompatibilité de type d'énergie : {e}")
-        except Exception:
+        except Exception as e:
+            logging.exception("process_pdf_invoice failed")  # <-- logs stacktrace
             raise HTTPException(status_code=500, detail="Erreur interne du serveur")
     # Base64-encode the raw bytes to safely include them in the JSON response
     non_anon_b64 = base64.b64encode(non_anon_bytes).decode('utf-8')
@@ -366,3 +368,7 @@ def job_status(task_id: str, _auth = Depends(require_api_key)):
     elif res.failed():
         raise HTTPException(status_code=500, detail="Job failed")
     return body
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}

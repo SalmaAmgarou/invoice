@@ -1,0 +1,14 @@
+services:
+  api:
+    build: .
+    image: invoice-api:sync
+    env_file: [.env]
+    ports: ["8000:8000"]
+    volumes:
+      - ./assets:/app/assets:ro
+    healthcheck:
+      # /health requires header; use CMD-SHELL to expand env
+      test: ["CMD-SHELL", "curl -fsS -H 'X-API-Key: ${API_KEY}' http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
