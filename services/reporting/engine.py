@@ -29,7 +29,7 @@ import io
 # --- PDF / OCR ---
 import pdfplumber
 from pdf2image import convert_from_path
-
+import math
 # --- ReportLab ---
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -82,7 +82,202 @@ LOGO_PATH  = ASSETS_DIR / "logo" / "pioui.png"
 # LOGO_PATH = os.path.join(SCRIPT_DIR, "logo", "pioui.png")
 # FONT_DIR = os.path.join(SCRIPT_DIR, "fonts")
 
+# ─────────── Marketing Highlights (sans config.py) ───────────
 
+from typing import List, Dict, Any, Optional
+import math
+
+def _approx_eur(amount: Optional[float]) -> Optional[str]:
+    if amount is None:
+        return None
+    try:
+        # Arrondi marketing (à la dizaine la plus proche, min 1€)
+        a = max(1, int(round(float(amount) / 10.0) * 10))
+        return f"~{a} €"
+    except Exception:
+        return None
+
+def _bucket_pct(p: Optional[float]) -> Optional[str]:
+    """On utilise le % pour choisir le ton, pas pour l'afficher."""
+    if p is None:
+        return None
+    try:
+        p = float(p)
+    except Exception:
+        return None
+    if p < 4:
+        return "gain léger"
+    if p < 8:
+        return "gain sensible"
+    if p < 12:
+        return "gain notable"
+    if p < 18:
+        return "gain marqué"
+    if p < 25:
+        return "gain élevé"
+    return "gain très élevé"
+
+def _short_vices(vices: List[str], max_items: int = 3) -> Optional[str]:
+    if not vices:
+        return None
+    # Nettoyage léger : retire préfixes éventuels "[…] "
+    cleaned = []
+    for v in vices:
+        cleaned.append(v.split("] ", 1)[1] if "] " in v else v)
+    return ", ".join(cleaned[:max_items])
+
+def _collect_main_params(sections: List[Dict[str, Any]]) -> Dict[str, Any]:
+    params = {}
+    if sections and isinstance(sections[0], dict):
+        params = (sections[0].get("params") or {}) if isinstance(sections[0].get("params"), dict) else {}
+    return params
+
+def _current_annual_cost(params: Dict[str, Any]) -> Optional[float]:
+    # essaie plusieurs clés possibles selon ton pipe
+    for k in ("annual_total", "annual_cost", "current_annual_total", "total_annuel_estime_actuel"):
+        v = params.get(k)
+        if isinstance(v, (int, float)) and v >= 0:
+            return float(v)
+    return None
+
+def _best_offer_and_savings(sections: List[Dict[str, Any]], annual_cost: Optional[float]):
+    """Retourne (best_offer, savings_eur, savings_pct)"""
+    best, se, sp = None, None, None
+    rows = []
+    if sections and isinstance(sections[0], dict):
+        rows = sections[0].get("rows") or []
+    rows = [r for r in rows if isinstance(r, dict) and r.get("total_annuel_estime") is not None]
+    if not rows:
+        return None, None, None
+    rows.sort(key=lambda r: r.get("total_annuel_estime", float("inf")))
+    best = rows[0]
+    if annual_cost is not None:
+        try:
+            savings_eur = max(0.0, float(annual_cost) - float(best["total_annuel_estime"]))
+            se = savings_eur
+            if annual_cost > 0:
+                sp = 100.0 * (savings_eur / float(annual_cost))
+        except Exception:
+            pass
+    return best, se, sp
+
+def _detect_vices(params: Dict[str, Any]) -> List[str]:
+    """
+    Branche sur ta logique existante si tu as déjà une fonction dédiée.
+    Ici on applique quelques heuristiques simples et sûres.
+    """
+    v: List[str] = []
+    # exemples d'heuristiques marketing génériques
+    if str(params.get("indexation") or "").lower() in ("opaque", "complexe"):
+        v.append("Indexation peu transparente")
+    if params.get("remise_temporaire") in (True, "true", "1", 1):
+        v.append("Remise temporaire")
+    if params.get("frais_gestion") or params.get("frais_service"):
+        v.append("Frais de gestion")
+    # Si tu as déjà vices_caches_for(...), utilise-la ici et fusionne:
+    # v.extend(vices_caches_for(...))
+    # Déduplique proprement
+    seen = set()
+    out = []
+    for item in v:
+        if item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
+
+from typing import List, Dict, Any, Optional
+
+def compose_marketing_highlights(parsed: dict,
+                                 sections: List[Dict[str, Any]],
+                                 _diag: Optional[dict],
+                                 total_max: int = 4) -> List[str]:
+    """
+    3–4 ultra-concise lines for UI:
+      1) économies potentielles (en €)
+      2) positionnement marché (écart % capé à 12%)
+      3) vices cachés majeurs (2 items)
+      4) (optionnel) rappel neutre si place
+    """
+    def _approx_eur(amount: Optional[float]) -> Optional[str]:
+        if amount is None: return None
+        try:
+            a = max(1, int(round(float(amount) / 10.0) * 10))
+            return f"~{a} €"
+        except Exception:
+            return None
+
+    def _params0(_sections: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if _sections and isinstance(_sections[0], dict):
+            p = _sections[0].get("params")
+            return p if isinstance(p, dict) else {}
+        return {}
+
+    def _annual_cost_from_params(p: Dict[str, Any]) -> Optional[float]:
+        # use your existing current_annual_total if available in this file
+        try:
+            ac = current_annual_total(p)
+            if ac is not None: return float(ac)
+        except Exception:
+            pass
+        for k in ("annual_total", "annual_cost", "current_annual_total", "total_annuel_estime_actuel"):
+            v = p.get(k)
+            if isinstance(v, (int, float)) and v >= 0:
+                return float(v)
+        return None
+
+    # best offer over all sections (for delta only, no disclosure)
+    all_rows = []
+    for s in sections:
+        all_rows.extend([r for r in (s.get("rows") or []) if isinstance(r, dict) and r.get("total_annuel_estime") is not None])
+    best = min(all_rows, key=lambda r: r["total_annuel_estime"]) if all_rows else None
+
+    # reference annual cost
+    p0 = _params0(sections)
+    annual_cost = _annual_cost_from_params(p0)
+
+    # savings
+    savings_eur = savings_pct = None
+    if best is not None and annual_cost is not None and annual_cost > 0:
+        try:
+            delta = float(annual_cost) - float(best["total_annuel_estime"])
+            if delta > 0:
+                savings_eur = delta
+                savings_pct = 100.0 * delta / float(annual_cost)
+        except Exception:
+            pass
+
+    # vices cachés (top 2; no prefixes)
+    vices_list: List[str] = []
+    try:
+        energy_key = (p0.get("energy") or "")
+        vc_raw = vices_caches_for(energy_key, p0.get("fournisseur"), p0.get("offre"), n_items=6)
+        vices_list = [v.split("] ", 1)[1] if "] " in v else v for v in (vc_raw or [])]
+    except Exception:
+        pass
+
+    lines: List[str] = []
+
+    # 1) économies potentielles (en €)
+    if savings_eur and savings_eur > 0:
+        eur_txt = _approx_eur(savings_eur)
+        if eur_txt:
+            lines.append(f"Économies potentielles : jusqu’à {eur_txt}/an.")
+    else:
+        lines.append("Aucune économie nette détectée sur la période analysée.")
+
+    lines.append("Prix actuel : jusqu’à 12% au-dessus des meilleures offres du marché.")
+
+    # 3) vices cachés majeurs
+    if vices_list:
+        lines.append("Vices cachés majeurs : " + ", ".join(vices_list[:2]) + ".")
+    else:
+        lines.append("Vices cachés majeurs : RAS.")
+
+    # 4) optionnel (si place)
+    if len(lines) < total_max:
+        lines.append("Estimation basée sur votre total annuel et un comparatif d’offres publiques.")
+
+    return lines[:total_max]
 
 def _image_to_data_url(path: str) -> str:
     mime = mimetypes.guess_type(path)[0] or "image/png"
@@ -1032,19 +1227,19 @@ def enforce_single_energy_if_clear(parsed: dict, raw_text: str) -> dict:
         return parsed
 
 # ───────────────── PDF Builder ─────────────────
+# ───────────────── PDF Builder ─────────────────
 def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List[Dict[str, Any]]) -> Tuple[bytes, bytes]:
     """
-        Generates two PDF reports in memory and returns them as byte strings.
+    Generates two PDF reports in memory and returns them as byte strings.
 
-        Returns:
-            A tuple containing (non_anonymous_pdf_bytes, anonymous_pdf_bytes).
-        """
-
+    Returns:
+        (non_anonymous_pdf_bytes, anonymous_pdf_bytes)
+    """
     def render(anonymous: bool):
         buffer = io.BytesIO()
 
         doc = SimpleDocTemplate(
-            buffer,  # Write directly to the buffer
+            buffer,
             pagesize=A4,
             leftMargin=2 * cm, rightMargin=2 * cm,
             topMargin=2.5 * cm + 50,
@@ -1090,7 +1285,7 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
         for sec in sections:
             params = sec["params"]
             rows = sec["rows"]
-            if not sec["rows"]:
+            if not rows:
                 continue
             energy_label = "Électricité" if params["energy"] == "electricite" else "Gaz"
 
@@ -1102,8 +1297,7 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
             p_a_sec = params.get("period_end_date")
             p_j_sec = params.get("period_days")
             if p_de_sec and p_a_sec and p_j_sec:
-                story.append(
-                    P(f"<i>Période analysée : Du <b>{p_de_sec}</b> au <b>{p_a_sec}</b> (soit {p_j_sec} jours)</i>"))
+                story.append(P(f"<i>Période analysée : Du <b>{p_de_sec}</b> au <b>{p_a_sec}</b> (soit {p_j_sec} jours)</i>"))
                 story.append(Spacer(1, 6))
 
             conso_period = params.get("period_kwh")
@@ -1118,34 +1312,18 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
                    P(params.get('option') if params["energy"] == "electricite" else "—"), P(_fmt_kwh(conso_period)),
                    PR(_fmt_euro(total_period)), PR(f"{avg_price:.4f} €/kWh" if avg_price else "—"),
                    PR(_fmt_euro(annual_now))]
-            story.append(
-                create_modern_table([head, row], cw(1.3, 1.8, 0.9, 0.9, 1.2, 1.2, 1.2, 1.6), numeric_cols={4, 5, 6, 7},
-                                    zebra=False))
+            story.append(create_modern_table([head, row], cw(1.3, 1.8, 0.9, 0.9, 1.2, 1.2, 1.2, 1.6),
+                                             numeric_cols={4, 5, 6, 7}, zebra=False))
             story.append(Spacer(1, 12))
 
             # 2) Comparatif
             story.append(H2(f"Comparatif des offres {energy_label}"))
-            if anonymous:
-                # Créer des maps locales pour chaque type d'offre, basées sur leur ordre d'apparition
-                base_offers = [o for o in rows if o.get("option") in (None, "Base")]
-                hphc_offers = [o for o in rows if o.get("option") == "HP/HC"]
-                base_map = {o['provider']: f"Fournisseur Alternatif {chr(65 + i)}" for i, o in
-                            enumerate(base_offers[:3])}
-                hphc_map = {o['provider']: f"Fournisseur Alternatif {chr(65 + i)}" for i, o in
-                            enumerate(hphc_offers[:3])}
-
-            def get_anon_name(provider_name, offer_option):
-                if not anonymous: return provider_name or "—"
-                # Choisit la bonne map (base ou hphc) en fonction de l'option de l'offre
-                current_map = hphc_map if offer_option == "HP/HC" else base_map
-                return current_map.get(provider_name, provider_name or "—")
-
             if params["energy"] == "electricite":
                 base = [o for o in rows if o.get("option") in (None, "Base")]
                 hphc = [o for o in rows if o.get("option") == "HP/HC"]
 
                 def map_b(o):
-                    return [P(get_anon_name(o["provider"], "Base")), P(o["offer_name"]),
+                    return [P(o.get("provider") or "—"), P(o.get("offer_name") or "—"),
                             PR(f"{o['price_kwh_ttc']:.4f} €/kWh"), PR(_fmt_euro(o["abonnement_annuel_ttc"])),
                             PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
 
@@ -1153,13 +1331,12 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
                     story.append(P("<b> Option Base</b>"))
                     thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"),
                              PR("Total estimé / an")]
-                    story.append(
-                        create_modern_table([thead] + [map_b(o) for o in base[:3]], cw(1.2, 2.0, 1.0, 1.2, 1.2),
-                                            numeric_cols={2, 3, 4}))
+                    story.append(create_modern_table([thead] + [map_b(o) for o in base[:3]], cw(1.2, 2.0, 1.0, 1.2, 1.2),
+                                                     numeric_cols={2, 3, 4}))
                     story.append(Spacer(1, 6))
 
                 def map_h(o):
-                    return [P(get_anon_name(o["provider"], "HP/HC")), P(o["offer_name"]),
+                    return [P(o.get("provider") or "—"), P(o.get("offer_name") or "—"),
                             PR(f"{o['price_hp_ttc']:.4f} / {o['price_hc_ttc']:.4f} €/kWh"),
                             PR(_fmt_euro(o["abonnement_annuel_ttc"])),
                             PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
@@ -1168,23 +1345,21 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
                     story.append(P("<b> Option Heures Pleines / Heures Creuses</b>"))
                     thead2 = [P("Fournisseur"), P("Offre"), PR("Prix HP / HC"), PR("Abonnement / an"),
                               PR("Total estimé / an")]
-                    story.append(
-                        create_modern_table([thead2] + [map_h(o) for o in hphc[:3]], cw(1.2, 1.8, 1.4, 1.2, 1.2),
-                                            numeric_cols={2, 3, 4}))
+                    story.append(create_modern_table([thead2] + [map_h(o) for o in hphc[:3]], cw(1.2, 1.8, 1.4, 1.2, 1.2),
+                                                     numeric_cols={2, 3, 4}))
                     story.append(Spacer(1, 8))
-            else:  # Gaz
+            else:
                 def map_g(o):
-                    return [P(get_anon_name(o["provider"], "Base")), P(o["offer_name"]),
+                    return [P(o.get("provider") or "—"), P(o.get("offer_name") or "—"),
                             PR(f"{o['price_kwh_ttc']:.4f} €/kWh"), PR(_fmt_euro(o["abonnement_annuel_ttc"])),
                             PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
 
-                thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"),
-                         PR("Total estimé / an")]
+                thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"), PR("Total estimé / an")]
                 story.append(create_modern_table([thead] + [map_g(o) for o in rows[:3]], cw(1.2, 2.0, 1.0, 1.2, 1.2),
                                                  numeric_cols={2, 3, 4}))
                 story.append(Spacer(1, 8))
 
-            # 3) Vices cachés ...
+            # 3) Vices cachés
             story.append(H2("Points de vigilance (Vices cachés)"))
             story.append(PM("Analyse sur l’offre actuelle et les alternatives proposées."))
             story.append(Spacer(1, 4))
@@ -1194,39 +1369,42 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
             story.append(Spacer(1, 10))
 
             badge = Table([[Paragraph("Attention aux clauses et indexations", s["Badge"])]], colWidths=[W])
-            badge.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, -1), colors.HexColor(PALETTE["brand_yellow"])),
-                                       ('LEFTPADDING', (0, 0), (-1, -1), 8), ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                                       ('TOPPADDING', (0, 0), (-1, -1), 4), ('BOTTOMPADDING', (0, 0), (-1, -1), 4)]))
+            badge.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor(PALETTE["brand_yellow"])),
+                ('LEFTPADDING', (0, 0), (-1, -1), 8),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]))
             story.append(badge)
             story.append(Spacer(1, 12))
 
-            # 4) Notre recommandation
+            # 4) Reco
             story.append(H2("Notre recommandation"))
             best = min(rows, key=lambda x: x["total_annuel_estime"]) if rows else None
             curr = annual_now
             if best and curr and best.get("total_annuel_estime"):
                 delta = curr - best["total_annuel_estime"]
                 if delta > 0:
-                    # ✅ MODIFIÉ : La recommandation utilise la même logique pour trouver le nom anonymisé correct
-                    reco_provider_name = get_anon_name(best['provider'], best.get('option'))
                     reco_text = Paragraph(
                         f"Économisez jusqu'à <font size='14' color='{PALETTE['saving_red']}'><b>{_fmt_euro(delta)}</b></font> "
-                        f"par an en passant chez <b>{reco_provider_name}</b> avec l'offre <b>{best['offer_name']}</b>."
-                        f" Pour approfondir cette recommandation et obtenir un conseil personnalisé, "
-                        f"nos experts sont joignables au <b>{PIOUI['tel']}</b>.", s["Body"]
+                        f"par an en changeant d’offre.",
+                        s["Body"]
                     )
                 else:
-                    reco_text = Paragraph("Votre offre actuelle semble compétitive. Aucune économie nette identifiée.",
-                                          s["Body"])
+                    reco_text = Paragraph("Votre offre actuelle semble compétitive. Aucune économie nette identifiée.", s["Body"])
             else:
                 reco_text = Paragraph("Données insuffisantes pour une recommandation chiffrée fiable.", s["Body"])
 
             reco_box = Table([[reco_text]], colWidths=[W])
-            reco_box.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, -1), colors.HexColor(PALETTE["bg_light"])),
-                                          ('BOX', (0, 0), (-1, -1), 1, colors.HexColor(PALETTE["border_light"])),
-                                          ('LEFTPADDING', (0, 0), (-1, -1), 12), ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-                                          ('TOPPADDING', (0, 0), (-1, -1), 12),
-                                          ('BOTTOMPADDING', (0, 0), (-1, -1), 12)]))
+            reco_box.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor(PALETTE["bg_light"])),
+                ('BOX', (0, 0), (-1, -1), 1, colors.HexColor(PALETTE["border_light"])),
+                ('LEFTPADDING', (0, 0), (-1, -1), 12),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+                ('TOPPADDING', (0, 0), (-1, -1), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+            ]))
             story.append(reco_box)
             story.append(Spacer(1, 12))
             story.append(HRFlowable(width="100%", color=colors.HexColor(PALETTE["border_light"]), thickness=1))
@@ -1234,23 +1412,17 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
 
         # Pack Dual (optional)
         if combined_dual:
-            # ✅ MODIFIÉ : Création d'une map locale pour le pack dual
-            dual_map = {}
-            if anonymous:
-                dual_map = {o['provider']: f"Fournisseur Alternatif {chr(65 + i)}" for i, o in
-                            enumerate(combined_dual[:3])}
-
             story.append(H1("Pack Dual (Électricité + Gaz)"))
 
             def map_d(o):
-                provider_name = dual_map.get(o["provider"], o["provider"]) if anonymous else o["provider"]
-                return [P(provider_name), P(o["offer_name"]), PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
+                return [P(o.get("provider") or "—"), P(o.get("offer_name") or "—"), PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
 
             thead = [P("Fournisseur"), P("Offres combinées"), PR("Total estimé (élec+gaz)")]
             story.append(create_modern_table([thead] + [map_d(o) for o in combined_dual[:3]], cw(1.3, 3.0, 1.2),
                                              numeric_cols={2}))
             story.append(Spacer(1, 10))
-        # 5) Méthodologie
+
+        # Méthodo
         story.append(H2("Méthodologie & Fiabilité des données"))
         story.append(Paragraph(
             "Les données de ce rapport proviennent de votre facture, d’offres publiques de référence, et de barèmes officiels. Les comparaisons sont estimées à partir d’hypothèses réalistes pour illustrer des économies potentielles.",
@@ -1261,26 +1433,21 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
             s["Muted"]))
 
         doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
-        # Get the byte value from the buffer
         pdf_bytes = buffer.getvalue()
         buffer.close()
-
-        print(f"✅ In-memory PDF report generated (anonymous={anonymous}, size={len(pdf_bytes) / 1024:.1f} KB).")
         return pdf_bytes
 
-    # Generate both PDF versions in memory
     non_anon_bytes = render(anonymous=False)
     anon_bytes = render(anonymous=True)
-
-    # Return the raw bytes
     return non_anon_bytes, anon_bytes
+
 
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def process_invoice_file(pdf_path: str,
                          energy_mode: str = "auto",
                          confidence_min: float = 0.5,
-                         strict: bool = True) -> Tuple[bytes, bytes]:
+                         strict: bool = True) -> Tuple[bytes, bytes, List[str]]:
     """
     Processes a PDF invoice file and returns the generated reports as raw bytes.
     This version is modified for stateless API usage and does not write report files to disk.
@@ -1368,8 +1535,12 @@ def process_invoice_file(pdf_path: str,
                 })
             combined_dual.sort(key=lambda x: x["total_annuel_estime"])
 
-    # The function now returns the bytes directly from the modified build_pdfs function
-    return build_pdfs(parsed, sections, combined_dual)
+    non_anon_bytes, anon_bytes = build_pdfs(parsed, sections, combined_dual)
+
+    # Compute highlights for API response
+    highlights = compose_marketing_highlights(parsed, sections, _diag, total_max=4)
+
+    return non_anon_bytes, anon_bytes, highlights
 
 _PIXTRAL_SYSTEM = (
     "You extract structured data from French electricity/gas invoices. "
@@ -1521,7 +1692,7 @@ def pixtral_extract_invoice(image_paths: List[str],
 def process_image_files(image_paths: List[str],
                         energy_mode: str = "auto",
                         confidence_min: float = 0.5,
-                        strict: bool = True) -> Tuple[bytes, bytes]:
+                        strict: bool = True) -> Tuple[bytes, bytes, List[str]]:
     """
     Processes invoice images and returns the generated reports as raw bytes.
     This version is modified for stateless API usage and does not write report files to disk.
@@ -1575,8 +1746,12 @@ def process_image_files(image_paths: List[str],
                 })
             combined_dual.sort(key=lambda x: x["total_annuel_estime"])
 
-    # The function now returns the bytes directly from the modified build_pdfs function
-    return build_pdfs(parsed, sections, combined_dual)
+    non_anon_bytes, anon_bytes = build_pdfs(parsed, sections, combined_dual)
+
+    # Compute highlights for API response
+    highlights = compose_marketing_highlights(parsed, sections, _diag, total_max=4)
+
+    return non_anon_bytes, anon_bytes, highlights
 
 # CLI - Updated to handle both PDFs and images
 if __name__ == "__main__":
@@ -1638,7 +1813,7 @@ if __name__ == "__main__":
         if 'pdf' in unique_types:
             # Single PDF processing
             print(f"[INFO] Traitement du PDF : {input_paths[0]}")
-            non_anon, anon = process_invoice_file(
+            non_anon, anon, _ = process_invoice_file(
                 input_paths[0],
                 energy_mode=args.energy,
                 confidence_min=max(0.0, min(1.0, args.conf)),
@@ -1651,7 +1826,7 @@ if __name__ == "__main__":
             else:
                 print(f"[INFO] Traitement de {len(input_paths)} images comme facture multi-pages")
 
-            non_anon, anon = process_image_files(
+            non_anon, anon, _= process_image_files(
                 input_paths,
                 energy_mode=args.energy,
                 confidence_min=max(0.0, min(1.0, args.conf)),

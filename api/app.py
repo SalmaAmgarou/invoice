@@ -122,8 +122,7 @@ class ProcessResponse(BaseModel):
     """The API response, containing both reports as Base64 encoded strings."""
     non_anonymous_report_base64: str = Field(..., description="Base64 encoded non-anonymous PDF report.")
     anonymous_report_base64: str = Field(..., description="Base64 encoded anonymous PDF report.")
-
-
+    highlights: list[str] = Field(default_factory=list, description="3–4 short marketing highlights.")
 # ————————————————————————————————————————————————————————————————
 # Endpoints
 # ————————————————————————————————————————————————————————————————
@@ -171,7 +170,7 @@ async def process_pdf_invoice(
 
         try:
             # Call  modified sync function (which now returns bytes) in a worker thread
-            non_anon_bytes, anon_bytes = await run_in_threadpool(
+            non_anon_bytes, anon_bytes, highlights = await run_in_threadpool(
                 process_invoice_file,
                 tmp_file.name,
                 energy_mode=energy,
@@ -192,6 +191,7 @@ async def process_pdf_invoice(
     return ProcessResponse(
         non_anonymous_report_base64=non_anon_b64,
         anonymous_report_base64=anon_b64,
+        highlights=highlights,
     )
 
 
@@ -253,7 +253,7 @@ async def process_image_invoices(
                 temp_files_paths.append(tmp_file.name)
 
         # Call  modified sync function with the list of temporary image paths
-        non_anon_bytes, anon_bytes = await run_in_threadpool(
+        non_anon_bytes, anon_bytes, highlights = await run_in_threadpool(
             process_image_files,
             temp_files_paths,
             energy_mode=energy,
@@ -274,6 +274,7 @@ async def process_image_invoices(
     return ProcessResponse(
         non_anonymous_report_base64=non_anon_b64,
         anonymous_report_base64=anon_b64,
+        highlights=highlights,
     )
 
 @app.post("/v1/jobs/pdf", response_model=JobEnqueueResponse, summary="Enqueue PDF invoice processing")

@@ -4,7 +4,7 @@ import base64
 
 # --- Configuration ---
 # The name of the JSON file  saved from  curl command
-INPUT_JSON_FILE = "decoder/response_pdf.json"
+INPUT_JSON_FILE = "php_scripts_examples/response_pdf.json"
 
 # --- Script ---
 print(f"Reading response from '{INPUT_JSON_FILE}'...")
