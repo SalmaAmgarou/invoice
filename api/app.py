@@ -123,6 +123,10 @@ class ProcessResponse(BaseModel):
     non_anonymous_report_base64: str = Field(..., description="Base64 encoded non-anonymous PDF report.")
     anonymous_report_base64: str = Field(..., description="Base64 encoded anonymous PDF report.")
     highlights: list[str] = Field(default_factory=list, description="3–4 short marketing highlights.")
+    # Optional pass-through identifiers (useful for DB correlation)
+    user_id: Optional[int] = Field(None, description="Optional user identifier passed in the request and echoed back.")
+    invoice_id: Optional[int] = Field(None, description="Optional invoice identifier passed in the request and echoed back.")
+    external_ref: Optional[str] = Field(None, description="Optional external reference string passed in the request and echoed back.")
 # ————————————————————————————————————————————————————————————————
 # Endpoints
 # ————————————————————————————————————————————————————————————————
@@ -142,6 +146,9 @@ async def process_pdf_invoice(
     energy: EnergyMode = Form("auto", description="Energy type to analyze: auto, electricite, gaz, or dual."),
     confidence_min: float = Form(0.5, ge=0.0, le=1.0, description="Confidence threshold for energy type detection."),
     strict: bool = Form(True, description="Whether to strictly enforce energy type detection."),
+    user_id: Optional[int] = Form(None, description="Optional user identifier to echo in the response."),
+    invoice_id: Optional[int] = Form(None, description="Optional invoice identifier to echo in the response."),
+    external_ref: Optional[str] = Form(None, description="Optional external reference to echo in the response."),
     _auth = Depends(require_api_key),
 ):
     """
@@ -192,6 +199,9 @@ async def process_pdf_invoice(
         non_anonymous_report_base64=non_anon_b64,
         anonymous_report_base64=anon_b64,
         highlights=highlights,
+        user_id=user_id,
+        invoice_id=invoice_id,
+        external_ref=external_ref,
     )
 
 
@@ -205,6 +215,9 @@ async def process_image_invoices(
     energy: EnergyMode = Form("auto", description="Energy type to analyze."),
     confidence_min: float = Form(0.5, ge=0.0, le=1.0),
     strict: bool = Form(True),
+    user_id: Optional[int] = Form(None, description="Optional user identifier to echo in the response."),
+    invoice_id: Optional[int] = Form(None, description="Optional invoice identifier to echo in the response."),
+    external_ref: Optional[str] = Form(None, description="Optional external reference to echo in the response."),
     _auth=Depends(require_api_key),
 
 ):
@@ -275,6 +288,9 @@ async def process_image_invoices(
         non_anonymous_report_base64=non_anon_b64,
         anonymous_report_base64=anon_b64,
         highlights=highlights,
+        user_id=user_id,
+        invoice_id=invoice_id,
+        external_ref=external_ref,
     )
 
 @app.post("/v1/jobs/pdf", response_model=JobEnqueueResponse, summary="Enqueue PDF invoice processing")
