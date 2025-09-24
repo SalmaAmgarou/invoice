@@ -143,7 +143,11 @@ async def health(_auth = Depends(require_api_key),):
 )
 async def process_pdf_invoice(
     file: UploadFile = File(..., description="A single PDF invoice file."),
-    energy: EnergyMode = Form("auto", description="Energy type to analyze: auto, electricite, gaz, or dual."),
+    type_: EnergyMode = Form(
+        "auto",
+        description="Type to analyze: auto, electricite, gaz, or dual.",
+        alias="type",
+    ),
     confidence_min: float = Form(0.5, ge=0.0, le=1.0, description="Confidence threshold for energy type detection."),
     strict: bool = Form(True, description="Whether to strictly enforce energy type detection."),
     user_id: Optional[int] = Form(None, description="Optional user identifier to echo in the response."),
@@ -180,7 +184,7 @@ async def process_pdf_invoice(
             non_anon_bytes, anon_bytes, highlights = await run_in_threadpool(
                 process_invoice_file,
                 tmp_file.name,
-                energy_mode=energy,
+                energy_mode=type_,
                 confidence_min=confidence_min,
                 strict=strict,
             )
@@ -212,7 +216,7 @@ async def process_pdf_invoice(
 )
 async def process_image_invoices(
     files: List[UploadFile] = File(..., description="One or more image files for a single invoice."),
-    energy: EnergyMode = Form("auto", description="Energy type to analyze."),
+    type_: EnergyMode = Form("auto", description="Type to analyze.", alias="type"),
     confidence_min: float = Form(0.5, ge=0.0, le=1.0),
     strict: bool = Form(True),
     user_id: Optional[int] = Form(None, description="Optional user identifier to echo in the response."),
@@ -269,7 +273,7 @@ async def process_image_invoices(
         non_anon_bytes, anon_bytes, highlights = await run_in_threadpool(
             process_image_files,
             temp_files_paths,
-            energy_mode=energy,
+            energy_mode=type_,
             confidence_min=confidence_min,
             strict=strict,
         )
@@ -296,7 +300,7 @@ async def process_image_invoices(
 @app.post("/v1/jobs/pdf", response_model=JobEnqueueResponse, summary="Enqueue PDF invoice processing")
 async def enqueue_pdf_job(
     file: UploadFile = File(...),
-    energy: EnergyMode = Form("auto"),
+    type_: EnergyMode = Form("auto", alias="type"),
     confidence_min: float = Form(0.5, ge=0.0, le=1.0),
     strict: bool = Form(True),
     webhook_url: Optional[str] = Form(None),
@@ -317,7 +321,7 @@ async def enqueue_pdf_job(
 
     task = process_pdf_task.apply_async(kwargs={
         "file_path": path,
-        "energy": energy,
+        "type": type_,
         "confidence_min": confidence_min,
         "strict": strict,
         "webhook_url": webhook_url,
@@ -331,7 +335,7 @@ async def enqueue_pdf_job(
 @app.post("/v1/jobs/images", response_model=JobEnqueueResponse, summary="Enqueue image invoice processing")
 async def enqueue_images_job(
     files: List[UploadFile] = File(...),
-    energy: EnergyMode = Form("auto"),
+    type_: EnergyMode = Form("auto", alias="type"),
     confidence_min: float = Form(0.5, ge=0.0, le=1.0),
     strict: bool = Form(True),
     webhook_url: Optional[str] = Form(None),
@@ -362,7 +366,7 @@ async def enqueue_images_job(
 
     task = process_images_task.apply_async(kwargs={
         "file_paths": paths,  # <— list of image paths
-        "energy": energy,
+        "type": type_,
         "confidence_min": confidence_min,
         "strict": strict,
         "webhook_url": webhook_url,
