@@ -165,7 +165,7 @@ GET `/health` → `{ "status": "ok" }`
 POST `/v1/invoices/pdf`
 - Form-Data:
   - `file` (PDF, obligatoire)
-  - `energy` ∈ {`auto`,`electricite`,`gaz`,`dual`} (défaut: `auto`)
+  - `type` ∈ {`auto`,`electricite`,`gaz`,`dual`} (défaut: `auto`)
   - `confidence_min` (float 0.0–1.0, défaut 0.5)
   - `strict` (bool, défaut true)
   - `user_id?` (int, optionnel) — renvoyé tel quel dans la réponse
@@ -195,14 +195,14 @@ Exemple cURL:
 curl -X POST http://localhost:8000/v1/invoices/pdf \
   -H "X-API-Key: $API_KEY" \
   -F file=@sample.pdf \
-  -F energy=auto -F confidence_min=0.5 -F strict=true
+  -F type=auto -F confidence_min=0.5 -F strict=true
 ```
 
 ### 3) Sync — Images multiples
 POST `/v1/invoices/images`
 - Form-Data:
   - `files` (1..8 images .jpg/.jpeg/.png/.bmp/.tif/.tiff)
-  - `energy`, `confidence_min`, `strict` (mêmes règles)
+  - `type`, `confidence_min`, `strict` (mêmes règles)
   - `user_id?`, `invoice_id?`, `external_ref?` (optionnels, renvoyés dans la réponse)
 
 Réponse identique au PDF.
@@ -255,7 +255,7 @@ Affichage des highlights (front): liste de phrases courtes, à montrer sous form
 Modèle minimal suggéré (à adapter à votre SI):
 
 - Table `invoices`/`factures`
-  - `id`, `user_id`, `source` (pdf|images), `energy`, `created_at`
+  - `id`, `user_id`, `source` (pdf|images), `type`, `created_at`
   - `non_anonymous_sha256`, `anonymous_sha256`, `non_anonymous_size`, `anonymous_size`
   - `report_non_anonymous` (BLOB/bytea) ou stockage sur disque + chemin
   - `report_anonymous` (BLOB/bytea) ou stockage sur disque + chemin
@@ -281,7 +281,7 @@ CREATE TABLE invoices (
   user_id       BIGINT NULL,
   external_ref  VARCHAR(255) NULL,
   source_kind   ENUM('pdf','images') NOT NULL,
-  energy        ENUM('auto','electricite','gaz','dual') NOT NULL,
+  type          ENUM('auto','electricite','gaz','dual') NOT NULL,
   created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_invoices_user FOREIGN KEY (user_id) REFERENCES users(id)
 );
@@ -328,7 +328,7 @@ CREATE TABLE users (
   created_at    timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TYPE energy_kind AS ENUM ('auto','electricite','gaz','dual');
+CREATE TYPE type_kind AS ENUM ('auto','electricite','gaz','dual');
 CREATE TYPE source_kind AS ENUM ('pdf','images');
 
 CREATE TABLE invoices (
@@ -336,7 +336,7 @@ CREATE TABLE invoices (
   user_id       bigint NULL REFERENCES users(id),
   external_ref  text NULL,
   source_kind   source_kind NOT NULL,
-  energy        energy_kind NOT NULL,
+  type          type_kind NOT NULL,
   created_at    timestamptz NOT NULL DEFAULT now()
 );
 
@@ -431,7 +431,7 @@ Sync PDF:
 curl -X POST "http://localhost:8000/v1/invoices/pdf" \
   -H "X-API-Key: ${API_KEY}" \
   -F "file=@sample.pdf" \
-  -F "energy=auto" -F "confidence_min=0.5" -F "strict=true" \
+-F "type=auto" -F "confidence_min=0.5" -F "strict=true" \
   -F "user_id=123" -F "invoice_id=456" -F "external_ref=ABC-2025-09"
 ```
 
@@ -442,7 +442,7 @@ WEBHOOK_TOKEN=secret php -S 127.0.0.1:8088 -t public
 curl -X POST "http://localhost:8000/v1/jobs/pdf" \
   -H "X-API-Key: ${API_KEY}" \
   -F "file=@sample.pdf" \
-  -F "energy=auto" \
+-F "type=auto" \
   -F "webhook_url=http://127.0.0.1:8088/invoice_ready.php"
 ```
 

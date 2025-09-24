@@ -40,7 +40,7 @@ def _post_webhook(url: str, payload: dict, task_id: str):
 def process_pdf_task(
     self,
     file_path: str,
-    energy: str,
+    type: str,
     confidence_min: float,
     strict: bool,
     webhook_url: Optional[str] = None,
@@ -50,7 +50,7 @@ def process_pdf_task(
     external_ref: Optional[str] = None,
     source_kind: Optional[str] = "pdf",
 ) -> dict:
-    non_anon, anon = process_invoice_file(file_path, energy_mode=energy,
+    non_anon, anon = process_invoice_file(file_path, energy_mode=type,
                                           confidence_min=confidence_min, strict=strict)
 
     result = {
@@ -83,7 +83,7 @@ def process_pdf_task(
 def process_images_task(
     self,
     file_paths: List[str],
-    energy: str,
+    type: str,
     confidence_min: float,
     strict: bool,
     webhook_url: Optional[str] = None,
@@ -93,7 +93,7 @@ def process_images_task(
     external_ref: Optional[str] = None,
     source_kind: Optional[str] = "images",
 ) -> dict:
-    non_anon, anon = process_image_files(file_paths, energy_mode=energy,
+    non_anon, anon = process_image_files(file_paths, energy_mode=type,
                                          confidence_min=confidence_min, strict=strict)
 
     result = {
