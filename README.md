@@ -165,7 +165,7 @@ GET `/health` → `{ "status": "ok" }`
 POST `/v1/invoices/pdf`
 - Form-Data:
   - `file` (PDF, obligatoire)
-  - `type` ∈ {`auto`,`electricite`,`gaz`,`dual`} (défaut: `auto`)
+  - `type` ∈ {`auto`,`electricite`,`gaz`,`dual`} (défaut: `auto`) (Très important pour le routing spécifique en fonction du type de la facture sélectionnée par User depuis l'interface)
   - `confidence_min` (float 0.0–1.0, défaut 0.5)
   - `strict` (bool, défaut true)
   - `user_id?` (int, optionnel) — renvoyé tel quel dans la réponse
