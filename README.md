@@ -98,6 +98,10 @@ CELERY_TASK_SOFT_TIME_LIMIT=540
 # Webhook sécurité (côté worker -> votre backend)
 WEBHOOK_TOKEN=ex-secret-bearer-optional
 WEBHOOK_SECRET=ex-hmac-secret-optional
+
+# 🆕 Sécurité avancée (production)
+FORCE_HTTPS=true
+ALLOWED_HOSTS=your-domain.com,api.your-domain.com
 ```
 
 Notes:
@@ -379,10 +383,14 @@ CREATE INDEX invoice_jobs_created_idx ON invoice_jobs(created_at);
 
 ## Sécurité
 
-- API Key via `X-API-Key` (obligatoire)
-- Webhook: Bearer optionnel (`WEBHOOK_TOKEN`) et HMAC-SHA256 (`WEBHOOK_SECRET`)
-- Validation stricte des uploads (extensions, MIME, taille max via `MAX_CONTENT_LENGTH`)
-- CORS via `ALLOWED_ORIGINS`
+- **API Key via `X-API-Key` (obligatoire)** - Protection contre l'accès non autorisé
+- **Webhook: Bearer optionnel (`WEBHOOK_TOKEN`) et HMAC-SHA256 (`WEBHOOK_SECRET`)** - Authentification et intégrité des webhooks
+- **Validation stricte des uploads** (extensions, MIME, taille max via `MAX_CONTENT_LENGTH`)
+- **CORS via `ALLOWED_ORIGINS`** - Contrôle des origines autorisées
+- **🆕 Protection des logs** - Les clés API sont automatiquement masquées dans les logs
+- **🆕 Headers de sécurité** - Protection contre XSS, clickjacking, MIME sniffing
+- **🆕 Redirection HTTPS** - Force HTTPS en production (`FORCE_HTTPS=true`)
+- **🆕 HSTS** - HTTP Strict Transport Security pour la sécurité long terme
 
 —
 
@@ -466,5 +474,233 @@ curl -X POST "http://localhost:8000/v1/jobs/pdf" \
 
 —
 
-Pour toute question technique: se référer aux fichiers `api/app.py`, `services/reporting/engine.py`, `tasks.py`, et à l’exemple `public/invoice_ready.php`.
+## 🐳 Guide d'Intégration Docker pour l'Équipe PHP
+
+### Déploiement Recommandé
+
+**Le service Python doit être déployé comme conteneur Docker séparé** pour les raisons suivantes:
+- ✅ Isolation des dépendances (Python, Tesseract, bibliothèques AI)
+- ✅ Cohérence entre environnements (dev/staging/prod)
+- ✅ Facilité de déploiement et scaling
+- ✅ Aucune installation sur les serveurs PHP
+
+### Architecture d'Intégration
+
+```
+PHP Application (Frontend/Backend)
+    ↓ HTTP/HTTPS API calls
+Docker Container (Service Python OCR)
+    ↓ Redis (pour les jobs Celery)
+Workers Celery (Background processing)
+```
+
+### Étapes d'Intégration pour l'Équipe PHP
+
+#### 1. Déploiement du Service Python
+```bash
+# Sur le serveur dédié au service Python
+git clone <votre-repo>
+cd invoice_ocr
+cp .env.example .env
+# Éditer .env avec vos valeurs
+
+# Déployer avec Docker
+docker-compose up -d
+
+# Vérifier que le service fonctionne
+curl -H "X-API-Key: votre-cle" http://localhost:8000/health
+```
+
+#### 2. Configuration PHP
+```php
+// Configuration dans votre application PHP
+$ocr_api_url = 'https://api-ocr.votre-domaine.com';  // URL du service Python
+$ocr_api_key = 'votre-cle-api';                       // Clé API partagée
+
+// Exemple d'appel API
+function callOcrApi($filePath, $type = 'auto') {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $ocr_api_url . '/v1/invoices/pdf');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'X-API-Key: ' . $ocr_api_key,
+        'Content-Type: multipart/form-data'
+    ]);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, [
+        'file' => new CURLFile($filePath),
+        'type' => $type,
+        'user_id' => $_SESSION['user_id'],
+        'invoice_id' => $invoiceId
+    ]);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode === 200) {
+        $data = json_decode($response, true);
+        // Décoder les PDFs Base64
+        $nonAnonPdf = base64_decode($data['non_anonymous_report_base64']);
+        $anonPdf = base64_decode($data['anonymous_report_base64']);
+        // Sauvegarder ou afficher les PDFs
+        return $data;
+    } else {
+        throw new Exception("Erreur API OCR: " . $response);
+    }
+}
+```
+
+#### 3. Mode Asynchrone (Recommandé pour Production)
+```php
+// Pour les gros volumes, utilisez le mode asynchrone
+function enqueueOcrJob($filePath, $webhookUrl) {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $ocr_api_url . '/v1/jobs/pdf');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'X-API-Key: ' . $ocr_api_key
+    ]);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, [
+        'file' => new CURLFile($filePath),
+        'webhook_url' => $webhookUrl,
+        'user_id' => $_SESSION['user_id']
+    ]);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    
+    $response = curl_exec($ch);
+    $data = json_decode($response, true);
+    curl_close($ch);
+    
+    return $data['task_id'];  // ID de la tâche pour suivi
+}
+
+// Webhook handler (public/invoice_ready.php déjà fourni)
+// Recevra automatiquement les résultats via POST
+```
+
+### Variables d'Environnement Requises
+
+```bash
+# Sur le serveur Python
+API_KEY=votre-cle-partagee
+ALLOWED_ORIGINS=https://votre-frontend.com
+FORCE_HTTPS=true
+ALLOWED_HOSTS=votre-domaine.com
+
+# Base de données (si nécessaire)
+CELERY_BROKER_URL=redis://redis:6379/0
+CELERY_RESULT_BACKEND=redis://redis:6379/1
+```
+
+### Monitoring et Maintenance
+
+```bash
+# Vérifier la santé du service
+curl -H "X-API-Key: votre-cle" https://api-ocr.votre-domaine.com/health
+
+# Logs du service
+docker-compose logs -f api
+
+# Redémarrer le service
+docker-compose restart api
+```
+
+### Points Importants pour l'Équipe PHP
+
+1. **Aucune connaissance Python requise** - Simple appel API HTTP
+2. **Service isolé** - Ne nécessite aucune modification des serveurs PHP
+3. **Scalable** - Peut déployer plusieurs instances derrière un load balancer
+4. **Monitoring intégré** - Endpoint `/health` pour vérification
+5. **Documentation complète** - Exemples PHP fournis dans `php_scripts_examples/`
+
+### Timeline d'Intégration Estimé
+- **Configuration Docker**: 1-2 jours
+- **Intégration PHP**: 1-2 semaines
+- **Tests et déploiement**: 1 semaine
+- **Total**: 2-3 semaines
+
+### 🔄 Intégration avec votre Base de Données
+
+**Mon service Python est STATELESS** - il ne stocke rien en base. Toute la persistance se fait côté PHP.
+
+#### Architecture avec Docker
+
+Le fait que mon service soit dockerisé **N'IMPACTE PAS** la logique de base de données que je vous ai fournie. Voici pourquoi :
+
+**✅ Votre base de données reste sur vos serveurs PHP**
+- Les tables `invoices`, `reports`, `invoice_jobs` restent identiques
+- Mon service Docker communique avec votre base via les **webhooks**
+- Aucune modification des schémas SQL que je vous ai donnés
+
+#### Flux de Données avec Docker
+
+```
+1. PHP → Docker (API) : Envoi facture + user_id, invoice_id, external_ref
+2. Docker (Traitement) : OCR + génération PDFs
+3. Docker → PHP (Webhook) : Retour PDFs + métadonnées + vos IDs
+4. PHP → Base de Données : Insertion dans vos tables existantes
+```
+
+#### Exemple Concret d'Intégration
+
+**1. Côté PHP - Appel API avec vos IDs :**
+```php
+// Vous envoyez vos IDs comme je l'ai documenté
+$response = callOcrApi($filePath, [
+    'type' => 'auto',
+    'user_id' => 123,           // Votre user_id
+    'invoice_id' => 456,        // Votre invoice_id  
+    'external_ref' => 'FAC-2025-001'  // Votre référence
+]);
+```
+
+**2. Côté Docker - Mon service retourne vos IDs :**
+```json
+{
+  "non_anonymous_report_base64": "...",
+  "anonymous_report_base64": "...", 
+  "highlights": ["...", "..."],
+  "user_id": 123,              // Vos IDs sont renvoyés
+  "invoice_id": 456,
+  "external_ref": "FAC-2025-001"
+}
+```
+
+**3. Côté PHP - Webhook reçoit tout :**
+```php
+// public/invoice_ready.php reçoit automatiquement :
+// - Les PDFs Base64
+// - Vos user_id, invoice_id, external_ref
+// - Les métadonnées (tailles, SHA256)
+
+// Vous insérez dans VOS tables comme prévu :
+INSERT INTO reports (invoice_id, non_anonymous_pdf, anonymous_pdf, ...)
+VALUES (?, ?, ?, ...);
+```
+
+#### Points Importants
+
+1. **Mes schémas SQL restent valides** - Docker ne change rien
+2. **Vos IDs sont préservés** - user_id, invoice_id, external_ref transitent intact
+3. **Webhook fonctionne identiquement** - même logique que sans Docker
+4. **Votre base reste indépendante** - aucun accès direct de mon service
+5. **Monitoring identique** - même tracking via vos tables
+
+#### Configuration Docker Requise
+
+```bash
+# Dans votre .env pour le service Docker
+API_KEY=votre-cle-partagee
+ALLOWED_ORIGINS=https://votre-frontend.com
+WEBHOOK_URL=https://votre-domaine.com/internal/invoice-ready
+WEBHOOK_TOKEN=votre-token-secret
+WEBHOOK_SECRET=votre-secret-hmac
+```
+
+**Résumé : Docker n'affecte AUCUNE logique de base de données. Tout fonctionne exactement comme je vous l'ai documenté initialement.**
+
+—
+
+Pour toute question technique: se référer aux fichiers `api/app.py`, `services/reporting/engine.py`, `tasks.py`, et à l'exemple `public/invoice_ready.php`.
 

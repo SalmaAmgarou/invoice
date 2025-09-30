@@ -39,3 +39,7 @@ class Config:
     CELERY_RESULT_EXPIRES = int(os.getenv("CELERY_RESULT_EXPIRES", "86400"))  # 24h
     CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "600"))  # 10 min
     CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "540"))
+
+    # Security settings
+    FORCE_HTTPS = os.getenv("FORCE_HTTPS", "false").lower() == "true"
+    ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*")  # Comma-separated list of allowed hosts

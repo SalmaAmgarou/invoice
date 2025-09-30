@@ -18,11 +18,14 @@ import tempfile
 from pathlib import Path
 from typing import List, Literal
 import hmac, hashlib, time
-from fastapi import Depends, HTTPException, Security, FastAPI, File, UploadFile, Form
+from fastapi import Depends, HTTPException, Security, FastAPI, File, UploadFile, Form, Request
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import RedirectResponse
 from core.config import Config
 import uuid, os
 from pathlib import Path
@@ -42,6 +45,64 @@ from services.reporting.engine import (
  )
 
 ALLOWED_IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+
+# Configure secure logging to prevent API key exposure
+class SecureLoggingFilter(logging.Filter):
+    """Filter to remove sensitive data from logs"""
+    
+    SENSITIVE_HEADERS = {'x-api-key', 'authorization', 'cookie'}
+    SENSITIVE_PARAMS = {'api_key', 'token', 'password', 'secret'}
+    
+    def filter(self, record):
+        if hasattr(record, 'msg') and isinstance(record.msg, str):
+            # Remove API keys from log messages
+            for header in self.SENSITIVE_HEADERS:
+                record.msg = record.msg.replace(f"{header}: ", f"{header}: [REDACTED] ")
+                record.msg = record.msg.replace(f'"{header}": ', f'"{header}": "[REDACTED]", ')
+            
+            # Remove sensitive parameters
+            for param in self.SENSITIVE_PARAMS:
+                record.msg = record.msg.replace(f"{param}=", f"{param}=[REDACTED]")
+                record.msg = record.msg.replace(f'"{param}": ', f'"{param}": "[REDACTED]", ')
+        
+        return True
+
+# Apply the filter to all loggers
+secure_filter = SecureLoggingFilter()
+logging.getLogger().addFilter(secure_filter)
+logging.getLogger("uvicorn.access").addFilter(secure_filter)
+logging.getLogger("fastapi").addFilter(secure_filter)
+
+class HTTPSRedirectMiddleware(BaseHTTPMiddleware):
+    """Middleware to enforce HTTPS in production"""
+    
+    def __init__(self, app, force_https: bool = False):
+        super().__init__(app)
+        self.force_https = force_https
+    
+    async def dispatch(self, request: Request, call_next):
+        # Only enforce HTTPS in production
+        if self.force_https and request.url.scheme == "http":
+            # Check if request is coming through a proxy (X-Forwarded-Proto)
+            proto = request.headers.get("x-forwarded-proto", "http")
+            if proto == "http":
+                # Redirect to HTTPS
+                https_url = request.url.replace(scheme="https")
+                return RedirectResponse(url=str(https_url), status_code=301)
+        
+        response = await call_next(request)
+        
+        # Add security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        
+        # Add HSTS header for HTTPS enforcement
+        if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        
+        return response
 
 # Use  existing app limit as a per-file guard (bytes)
 MAX_IMAGE_BYTES = Config.MAX_CONTENT_LENGTH
@@ -102,6 +163,18 @@ app = FastAPI(
     title="Pioui Invoice API",
     version="2.0.0",
     description="An API to process energy invoices and generate comparison reports."
+)
+
+# Security middleware (add first, before CORS)
+app.add_middleware(
+    HTTPSRedirectMiddleware,
+    force_https=os.getenv("FORCE_HTTPS", "false").lower() == "true"
+)
+
+# Trusted host middleware for additional security
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["*"] if os.getenv("ALLOWED_HOSTS") is None else os.getenv("ALLOWED_HOSTS").split(",")
 )
 
 # CORS (adjust for  frontend origins in production)
