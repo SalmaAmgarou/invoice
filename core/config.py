@@ -43,3 +43,13 @@ class Config:
     # Security settings
     FORCE_HTTPS = os.getenv("FORCE_HTTPS", "false").lower() == "true"
     ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*")  # Comma-separated list of allowed hosts
+
+    # DigitalOcean Spaces
+    DO_SPACES_KEY = os.getenv("DO_SPACES_KEY")
+    DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET")
+    DO_SPACES_REGION = os.getenv("DO_SPACES_REGION", "ams3")
+    DO_SPACES_ENDPOINT = os.getenv("DO_SPACES_ENDPOINT")
+    DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
+
+    # Environment tag for object prefixes (e.g., 'prod' or 'staging')
+    ENV = os.getenv("ENV", "dev")
