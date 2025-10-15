@@ -50,12 +50,13 @@ def process_pdf_task(
     external_ref: Optional[str] = None,
     source_kind: Optional[str] = "pdf",
 ) -> dict:
-    non_anon, anon = process_invoice_file(file_path, energy_mode=type,
-                                          confidence_min=confidence_min, strict=strict)
+    non_anon, anon, highlights = process_invoice_file(file_path, energy_mode=type,
+                                                      confidence_min=confidence_min, strict=strict)
 
     result = {
         "non_anonymous_report_base64": _b64(non_anon),
         "anonymous_report_base64": _b64(anon),
+        "highlights": highlights,
         # optional integrity metadata (handy for DB/audits)
         "non_anonymous_size": len(non_anon),
         "anonymous_size": len(anon),
@@ -93,12 +94,13 @@ def process_images_task(
     external_ref: Optional[str] = None,
     source_kind: Optional[str] = "images",
 ) -> dict:
-    non_anon, anon = process_image_files(file_paths, energy_mode=type,
-                                         confidence_min=confidence_min, strict=strict)
+    non_anon, anon, highlights = process_image_files(file_paths, energy_mode=type,
+                                                     confidence_min=confidence_min, strict=strict)
 
     result = {
         "non_anonymous_report_base64": _b64(non_anon),
         "anonymous_report_base64": _b64(anon),
+        "highlights": highlights,
         "non_anonymous_size": len(non_anon),
         "anonymous_size": len(anon),
         "non_anonymous_sha256": hashlib.sha256(non_anon).hexdigest(),

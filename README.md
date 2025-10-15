@@ -31,14 +31,16 @@ Le service renvoie les PDF en Base64, ainsi qu’une courte liste de « highligh
 ```
 invoice_ocr/
 │── api/                      # Application FastAPI (endpoints)
-│   └── app.py                # Déclare les routes sync & jobs, sécurité, CORS
+│   └── app.py                # Déclare les routes sync & jobs, sécurité, CORS + backup Spaces
 │
 │── services/
-│   └── reporting/
-│       └── engine.py         # Coeur métier: OCR/extraction + rendu PDF + highlights
+│   ├── reporting/
+│   │   └── engine.py         # Coeur métier: OCR/extraction + rendu PDF + highlights
+│   └── storage/
+│       └── spaces.py         # Client DigitalOcean Spaces (backup automatique S3-compatible)
 │
 │── core/
-│   ├── config.py             # Chargement .env, constantes (tailles, CORS, brokers)
+│   ├── config.py             # Chargement .env, constantes (tailles, CORS, brokers, Spaces)
 │   └── security.py           # (réservé / non utilisé si vide ici)
 │
 │── celery_app.py             # Instance Celery (broker/backend, sérialisation)
@@ -50,7 +52,7 @@ invoice_ocr/
 │── reports_internal/         # (optionnel) journaux/diagnostics
 │
 │── public/
-│   └── invoice_ready.php     # Exemple de récepteur webhook (PHP) prêt à l’emploi
+│   └── invoice_ready.php     # Exemple de récepteur webhook (PHP) prêt à l'emploi
 │
 │── Dockerfile                # Image API (python:3.11-slim + tesseract/poppler)
 │── docker-compose.yml        # Service API (ports, healthcheck, volumes)
@@ -60,8 +62,9 @@ invoice_ocr/
 ```
 
 Rôles clés:
-- `api/app.py`: routes `/v1/invoices/*` sync et `/v1/jobs/*` async, header API Key, encodage Base64, highlights
+- `api/app.py`: routes `/v1/invoices/*` sync et `/v1/jobs/*` async, header API Key, encodage Base64, highlights + backup automatique DigitalOcean
 - `services/reporting/engine.py`: lecture PDF/images, extraction (LLM + heuristiques), génération des 2 PDF, composition des highlights
+- `services/storage/spaces.py`: client DigitalOcean Spaces (backup automatique des factures et rapports avec organisation hiérarchique)
 - `tasks.py`: pipeline Celery (retour JSON standardisé, envoi webhook sécurisé, nettoyage des fichiers)
 - `public/invoice_ready.php`: exemple réaliste de consommateur webhook (écriture disque ou UPSERT DB)
 
@@ -102,12 +105,164 @@ WEBHOOK_SECRET=ex-hmac-secret-optional
 # 🆕 Sécurité avancée (production)
 FORCE_HTTPS=true
 ALLOWED_HOSTS=your-domain.com,api.your-domain.com
+
+# 🆕 DigitalOcean Spaces (backup automatique)
+DO_SPACES_KEY=your-access-key
+DO_SPACES_SECRET=your-secret-key
+DO_SPACES_REGION=ams3
+DO_SPACES_ENDPOINT=https://ams3.digitaloceanspaces.com
+DO_SPACES_BUCKET=your-bucket-name
+ENV=prod
 ```
 
 Notes:
 - `API_KEY` accepte plusieurs valeurs (comparaison constante côté serveur).
 - `ALLOWED_ORIGINS` doit contenir vos domaines front (CORS).
+- `DO_SPACES_*` : configuration DigitalOcean Spaces pour backup automatique (optionnel mais recommandé en production).
+- `ENV` : tag d'environnement pour l'organisation des objets (dev/staging/prod).
 - Pour Windows local sans Docker, installez Tesseract/Poppler; sinon utilisez Docker.
+
+—
+
+## 🗄️ DigitalOcean Spaces - Backup Automatique
+
+### Vue d'ensemble technique
+
+L'API intègre un système de backup automatique vers DigitalOcean Spaces (compatible S3) qui sauvegarde toutes les factures et rapports générés. Cette fonctionnalité s'exécute en arrière-plan et n'affecte pas les performances de l'API.
+
+### Fonctionnement technique
+
+**1. Déclenchement automatique :**
+- Chaque traitement de facture (PDF ou images) déclenche automatiquement un backup
+- Le backup s'exécute en tâche de fond (BackgroundTasks) pour ne pas ralentir la réponse API
+- Aucune intervention manuelle requise
+
+**2. Organisation hiérarchique :**
+```
+bucket/
+├── prod/                           # Environnement (ENV)
+│   ├── user-123__client-name/      # Utilisateur + nom client
+│   │   ├── invoice-456/            # ID facture ou référence externe
+│   │   │   ├── 20250115T143022Z/   # Timestamp unique du traitement
+│   │   │   │   ├── original_electricite.pdf     # PDF original
+│   │   │   │   ├── report_full_electricite.pdf  # Rapport non-anonymisé
+│   │   │   │   ├── report_anon_electricite.pdf  # Rapport anonymisé
+│   │   │   │   ├── page-001.jpg                 # Pages originales (si images)
+│   │   │   │   ├── page-002.jpg
+│   │   │   │   └── manifest.json               # Métadonnées du traitement
+```
+
+**3. Métadonnées incluses :**
+- `x-amz-meta-user-id` : ID utilisateur
+- `x-amz-meta-invoice-id` : ID facture
+- `x-amz-meta-external-ref` : Référence externe
+- `x-amz-meta-source-kind` : Type source (pdf/images)
+- `x-amz-meta-energy-type` : Type d'énergie détecté
+- `x-amz-meta-run-id` : ID unique du traitement
+
+**4. Manifest JSON :**
+```json
+{
+  "env": "prod",
+  "run_id": "20250115T143022Z",
+  "timestamp": "2025-01-15T14:30:22Z",
+  "user_id": 123,
+  "invoice_id": 456,
+  "external_ref": "FAC-2025-001",
+  "energy_type": "electricite",
+  "customer_name": "Client Name",
+  "highlights": ["Économies potentielles: 15%", "..."],
+  "original_pages": ["page-001.jpg", "page-002.jpg"]
+}
+```
+
+### Configuration DigitalOcean Spaces
+
+**1. Créer un Space :**
+- Connectez-vous à DigitalOcean
+- Allez dans Spaces → Create a Space
+- Choisissez une région proche (ex: Amsterdam `ams3`)
+- Nommez votre bucket (ex: `invoice-backups-prod`)
+
+**2. Générer les clés d'accès :**
+- API → Manage Tokens → Spaces access keys
+- Créez une nouvelle clé avec permissions read/write
+- Copiez la clé d'accès et le secret
+
+**3. Configuration .env :**
+```ini
+DO_SPACES_KEY=your-access-key-here
+DO_SPACES_SECRET=your-secret-key-here
+DO_SPACES_REGION=ams3
+DO_SPACES_ENDPOINT=https://ams3.digitaloceanspaces.com
+DO_SPACES_BUCKET=your-bucket-name
+ENV=prod
+```
+
+### Avantages pour l'équipe de développement
+
+**1. Audit et traçabilité :**
+- Historique complet de tous les traitements
+- Possibilité de retrouver n'importe quelle facture traitée
+- Métadonnées complètes pour debugging
+
+**2. Conformité et sécurité :**
+- Chiffrement AES-256 côté serveur
+- ACL privé (accès contrôlé)
+- Stockage géographiquement distribué
+
+**3. Récupération et backup :**
+- Sauvegarde automatique de tous les documents
+- Possibilité de restaurer des rapports perdus
+- Versioning par timestamp (pas d'écrasement)
+
+**4. Analytics et monitoring :**
+- Manifest JSON pour chaque traitement
+- Métriques d'usage et patterns
+- Détection d'anomalies
+
+### Monitoring et maintenance
+
+**Vérification du service :**
+```bash
+# Test de connexion au démarrage (logs)
+docker-compose logs api | grep "spaces_probe_ok"
+
+# Vérification manuelle des uploads
+curl -H "X-API-Key: $API_KEY" http://localhost:8000/health
+```
+
+**Logs de backup :**
+```bash
+# Suivre les uploads réussis
+docker-compose logs -f api | grep "spaces_upload_ok"
+
+# Détecter les erreurs de backup
+docker-compose logs -f api | grep "spaces_upload_error"
+```
+
+### Coûts et optimisation
+
+**Tarification DigitalOcean Spaces :**
+- Stockage : ~0.02€/GB/mois
+- Transfert sortant : ~0.01€/GB
+- Requêtes : ~0.004€/10k requêtes
+
+**Optimisations incluses :**
+- Compression automatique des PDFs
+- Métadonnées optimisées
+- Organisation hiérarchique pour réduction des coûts de listing
+
+### Désactivation (optionnel)
+
+Pour désactiver le backup automatique :
+```ini
+# Commenter ou supprimer les variables DO_SPACES_*
+# DO_SPACES_KEY=
+# DO_SPACES_SECRET=
+```
+
+L'API continuera de fonctionner normalement sans backup.
 
 —
 
@@ -175,6 +330,8 @@ POST `/v1/invoices/pdf`
   - `user_id?` (int, optionnel) — renvoyé tel quel dans la réponse
   - `invoice_id?` (int, optionnel) — renvoyé tel quel dans la réponse
   - `external_ref?` (string, optionnel) — renvoyé tel quel dans la réponse
+  - `customer_name?` (string, optionnel) — nom client pour organisation backup
+- **🆕 Backup automatique** : Tous les documents sont automatiquement sauvegardés vers DigitalOcean Spaces en arrière-plan
 
 Réponse (200):
 ```json
@@ -208,6 +365,8 @@ POST `/v1/invoices/images`
   - `files` (1..8 images .jpg/.jpeg/.png/.bmp/.tif/.tiff)
   - `type`, `confidence_min`, `strict` (mêmes règles)
   - `user_id?`, `invoice_id?`, `external_ref?` (optionnels, renvoyés dans la réponse)
+  - `customer_name?` (string, optionnel) — nom client pour organisation backup
+- **🆕 Backup automatique** : Images originales + rapports sauvegardés vers DigitalOcean Spaces
 
 Réponse identique au PDF.
 
@@ -391,6 +550,242 @@ CREATE INDEX invoice_jobs_created_idx ON invoice_jobs(created_at);
 - **🆕 Headers de sécurité** - Protection contre XSS, clickjacking, MIME sniffing
 - **🆕 Redirection HTTPS** - Force HTTPS en production (`FORCE_HTTPS=true`)
 - **🆕 HSTS** - HTTP Strict Transport Security pour la sécurité long terme
+
+—
+
+## 🔧 Guide Technique - DigitalOcean Spaces pour l'Équipe Dev
+
+### Architecture technique détaillée
+
+**1. Client Spaces (`services/storage/spaces.py`)**
+```python
+class SpacesClient:
+    """Client S3-compatible pour DigitalOcean Spaces"""
+    
+    def __init__(self):
+        # Configuration boto3 avec endpoint DigitalOcean
+        self._s3 = boto3.client("s3", ...)
+    
+    def build_prefix(self, user_id, invoice_id, customer_name, run_id):
+        # Construction hiérarchique: env/user__client/invoice/timestamp/
+        return f"{self.env}/{uid}/{inv}/{run_id}"
+    
+    def upload_files_flat(self, prefix, filenames, original_pdf_bytes, ...):
+        # Upload parallèle: original, rapport_full, rapport_anon, manifest
+```
+
+**2. Intégration dans l'API (`api/app.py`)**
+```python
+def _enqueue_spaces_backup_pdf(background_tasks, user_id, invoice_id, ...):
+    """Tâche de fond pour backup automatique"""
+    def _task():
+        # Upload vers DigitalOcean en arrière-plan
+        keys = _spaces.upload_files_flat(...)
+        logger.info("spaces_upload_ok", extra={"keys": keys})
+
+@app.post("/v1/invoices/pdf")
+async def create_from_pdf(background_tasks: BackgroundTasks, ...):
+    # 1. Traitement principal (synchrone)
+    non_anon_bytes, anon_bytes, highlights = process_invoice_file(...)
+    
+    # 2. Backup en arrière-plan (asynchrone)
+    _enqueue_spaces_backup_pdf(background_tasks, ...)
+    
+    # 3. Retour immédiat à l'utilisateur
+    return {"non_anonymous_report_base64": base64.b64encode(...)}
+```
+
+### Flux de données technique
+
+```
+1. Request → API (app.py)
+   ↓
+2. Validation + Upload temporaire
+   ↓
+3. Processing (engine.py) → PDFs générés
+   ↓
+4. Response immédiate (Base64)
+   ↓
+5. Background Task → SpacesClient
+   ↓
+6. Upload vers DigitalOcean (parallèle)
+   ↓
+7. Logs + Monitoring
+```
+
+### Métadonnées et organisation
+
+**Structure des clés S3 :**
+```
+prod/user-123__client-name/invoice-456/20250115T143022Z/
+├── original_electricite.pdf      # SHA-256 dans métadonnées
+├── report_full_electricite.pdf   # Rapport non-anonymisé
+├── report_anon_electricite.pdf   # Rapport anonymisé  
+├── page-001.jpg                  # Pages originales (si images)
+├── page-002.jpg
+└── manifest.json                 # Métadonnées complètes
+```
+
+**Métadonnées S3 standardisées :**
+```python
+metadata = {
+    "x-amz-meta-user-id": "123",
+    "x-amz-meta-invoice-id": "456", 
+    "x-amz-meta-external-ref": "FAC-2025-001",
+    "x-amz-meta-source-kind": "pdf",
+    "x-amz-meta-energy-type": "electricite",
+    "x-amz-meta-run-id": "20250115T143022Z"
+}
+```
+
+### Gestion d'erreurs et monitoring
+
+**Logs structurés :**
+```python
+# Succès
+logger.info("spaces_upload_ok", extra={
+    "prefix": prefix, 
+    "keys": keys,
+    "user_id": user_id
+})
+
+# Erreurs
+logger.exception("spaces_upload_error", exc_info=e)
+```
+
+**Monitoring en production :**
+```bash
+# Vérification des uploads
+grep "spaces_upload_ok" /var/log/api.log | wc -l
+
+# Détection des erreurs
+grep "spaces_upload_error" /var/log/api.log
+
+# Métriques de performance
+grep "spaces_upload_ok" /var/log/api.log | jq '.extra.prefix'
+```
+
+### Optimisations techniques implémentées
+
+**1. Upload parallèle :**
+- Original PDF, rapport full, rapport anon uploadés simultanément
+- Manifest JSON généré et uploadé en dernier
+- Pas de dépendances entre les uploads
+
+**2. Compression et optimisation :**
+- PDFs déjà compressés par le moteur de rendu
+- Métadonnées minimales mais complètes
+- Organisation hiérarchique pour listing efficace
+
+**3. Sécurité :**
+- Chiffrement AES-256 côté serveur (automatique DigitalOcean)
+- ACL privé (pas d'accès public)
+- Signature S3v4 pour authentification
+
+**4. Idempotence :**
+- Timestamp unique par traitement (`run_id`)
+- Pas d'écrasement accidentel
+- Possibilité de retraitement sans conflit
+
+### Configuration avancée
+
+**Variables d'environnement détaillées :**
+```ini
+# DigitalOcean Spaces
+DO_SPACES_KEY=your-access-key              # Clé d'accès API
+DO_SPACES_SECRET=your-secret-key           # Secret API
+DO_SPACES_REGION=ams3                      # Région (ams3, nyc3, sfo3, sgp1, fra1)
+DO_SPACES_ENDPOINT=https://ams3.digitaloceanspaces.com  # Endpoint spécifique
+DO_SPACES_BUCKET=invoice-backups-prod      # Nom du bucket
+ENV=prod                                   # Tag environnement (dev/staging/prod)
+```
+
+**Configuration boto3 :**
+```python
+config=BotoConfig(
+    signature_version="s3v4",              # Signature moderne
+    retries={'max_attempts': 3},           # Retry automatique
+    max_pool_connections=50                # Pool de connexions
+)
+```
+
+### Intégration avec votre infrastructure
+
+**1. Monitoring externe :**
+```bash
+# Script de vérification de santé
+curl -f "https://api.domain.com/health" || alert_team
+
+# Vérification des backups
+aws s3 ls s3://bucket/prod/ --recursive | wc -l
+```
+
+**2. Alertes et notifications :**
+```python
+# Exemple d'intégration avec votre système d'alertes
+if upload_failed:
+    send_slack_alert(f"Backup failed for user {user_id}")
+    create_jira_ticket(f"DigitalOcean backup issue: {error}")
+```
+
+**3. Analytics et reporting :**
+```sql
+-- Exemple de requête pour analytics
+SELECT 
+    DATE(created_at) as date,
+    COUNT(*) as uploads_count,
+    SUM(CASE WHEN spaces_upload_ok THEN 1 ELSE 0 END) as successful_backups
+FROM invoice_logs 
+GROUP BY DATE(created_at);
+```
+
+### Dépannage technique
+
+**Problèmes courants :**
+
+1. **Erreur d'authentification :**
+```bash
+# Vérifier les clés
+aws s3 ls --endpoint-url=https://ams3.digitaloceanspaces.com
+```
+
+2. **Erreur de permissions :**
+```bash
+# Vérifier les ACLs du bucket
+aws s3api get-bucket-acl --bucket your-bucket --endpoint-url=...
+```
+
+3. **Timeout d'upload :**
+```python
+# Augmenter les timeouts dans boto3
+config=BotoConfig(
+    read_timeout=60,
+    connect_timeout=10
+)
+```
+
+**Debugging avancé :**
+```bash
+# Logs détaillés boto3
+export BOTO_CONFIG=/dev/null
+export AWS_DEBUG=1
+
+# Monitoring en temps réel
+tail -f /var/log/api.log | grep "spaces_"
+```
+
+### Coûts et facturation
+
+**Estimation des coûts (pour 1000 factures/mois) :**
+- Stockage : ~50MB/facture = 50GB/mois = ~1€/mois
+- Transfert : ~100MB/facture = 100GB/mois = ~1€/mois  
+- Requêtes : ~10 requêtes/facture = 10k requêtes/mois = ~0.004€/mois
+- **Total estimé : ~2€/mois pour 1000 factures**
+
+**Optimisation des coûts :**
+- Lifecycle policies pour archivage automatique
+- Compression des objets volumineux
+- Monitoring des métriques d'usage
 
 —
 
