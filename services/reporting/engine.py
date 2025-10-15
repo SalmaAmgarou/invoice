@@ -1283,6 +1283,10 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
 
         # — Sections per energy type
         for sec in sections:
+            # Reset provider letter mapping for each energy type section
+            provider_letter_map = {}
+            letter_counter = 0
+            
             params = sec["params"]
             rows = sec["rows"]
             if not rows:
@@ -1318,16 +1322,35 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
 
             # 2) Comparatif
             story.append(H2(f"Comparatif des offres {energy_label}"))
+            if anonymous:
+                # Créer des maps locales pour chaque type d'offre, basées sur leur ordre d'apparition
+                base_offers = [o for o in rows if o.get("option") in (None, "Base")]
+                hphc_offers = [o for o in rows if o.get("option") == "HP/HC"]
+                base_map = {o['provider']: f"Fournisseur Alternatif {chr(65 + i)}" for i, o in
+                            enumerate(base_offers[:3])}
+                hphc_map = {o['provider']: f"Fournisseur Alternatif {chr(65 + i)}" for i, o in
+                            enumerate(hphc_offers[:3])}
+
+            def get_anon_name(provider_name, offer_option):
+                if not anonymous: return provider_name or "—"
+                # Choisit la bonne map (base ou hphc) en fonction de l'option de l'offre
+                current_map = hphc_map if offer_option == "HP/HC" else base_map
+                return current_map.get(provider_name, provider_name or "—")
+
             if params["energy"] == "electricite":
                 base = [o for o in rows if o.get("option") in (None, "Base")]
                 hphc = [o for o in rows if o.get("option") == "HP/HC"]
 
                 def map_b(o):
-                    return [P(o.get("provider") or "—"), P(o.get("offer_name") or "—"),
+                    return [P(get_anon_name(o["provider"], "Base")), P(o["offer_name"]),
                             PR(f"{o['price_kwh_ttc']:.4f} €/kWh"), PR(_fmt_euro(o["abonnement_annuel_ttc"])),
                             PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
 
                 if base:
+                    # Reset provider letter mapping for Base table
+                    provider_letter_map = {}
+                    letter_counter = 0
+                    
                     story.append(P("<b> Option Base</b>"))
                     thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"),
                              PR("Total estimé / an")]
@@ -1336,7 +1359,7 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
                     story.append(Spacer(1, 6))
 
                 def map_h(o):
-                    return [P(o.get("provider") or "—"), P(o.get("offer_name") or "—"),
+                    return [P(get_anon_name(o["provider"], "HP/HC")), P(o["offer_name"]),
                             PR(f"{o['price_hp_ttc']:.4f} / {o['price_hc_ttc']:.4f} €/kWh"),
                             PR(_fmt_euro(o["abonnement_annuel_ttc"])),
                             PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
@@ -1348,13 +1371,14 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
                     story.append(create_modern_table([thead2] + [map_h(o) for o in hphc[:3]], cw(1.2, 1.8, 1.4, 1.2, 1.2),
                                                      numeric_cols={2, 3, 4}))
                     story.append(Spacer(1, 8))
-            else:
+            else:  # Gaz
                 def map_g(o):
-                    return [P(o.get("provider") or "—"), P(o.get("offer_name") or "—"),
+                    return [P(get_anon_name(o["provider"], "Base")), P(o["offer_name"]),
                             PR(f"{o['price_kwh_ttc']:.4f} €/kWh"), PR(_fmt_euro(o["abonnement_annuel_ttc"])),
                             PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
 
-                thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"), PR("Total estimé / an")]
+                thead = [P("Fournisseur"), P("Offre"), PR("Prix kWh TTC"), PR("Abonnement / an"),
+                         PR("Total estimé / an")]
                 story.append(create_modern_table([thead] + [map_g(o) for o in rows[:3]], cw(1.2, 2.0, 1.0, 1.2, 1.2),
                                                  numeric_cols={2, 3, 4}))
                 story.append(Spacer(1, 8))
@@ -1386,10 +1410,13 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
             if best and curr and best.get("total_annuel_estime"):
                 delta = curr - best["total_annuel_estime"]
                 if delta > 0:
+                    # ✅ MODIFIÉ : La recommandation utilise la même logique pour trouver le nom anonymisé correct
+                    reco_provider_name = get_anon_name(best['provider'], best.get('option'))
                     reco_text = Paragraph(
                         f"Économisez jusqu'à <font size='14' color='{PALETTE['saving_red']}'><b>{_fmt_euro(delta)}</b></font> "
-                        f"par an en changeant d’offre.",
-                        s["Body"]
+                        f"par an en passant chez <b>{reco_provider_name}</b> avec l'offre <b>{best['offer_name']}</b>."
+                        f" Pour approfondir cette recommandation et obtenir un conseil personnalisé, "
+                        f"nos experts sont joignables au <b>{PIOUI['tel']}</b>.", s["Body"]
                     )
                 else:
                     reco_text = Paragraph("Votre offre actuelle semble compétitive. Aucune économie nette identifiée.", s["Body"])
@@ -1412,10 +1439,17 @@ def build_pdfs(parsed: dict, sections: List[Dict[str, Any]], combined_dual: List
 
         # Pack Dual (optional)
         if combined_dual:
+            # ✅ MODIFIÉ : Création d'une map locale pour le pack dual
+            dual_map = {}
+            if anonymous:
+                dual_map = {o['provider']: f"Fournisseur Alternatif {chr(65 + i)}" for i, o in
+                            enumerate(combined_dual[:3])}
+
             story.append(H1("Pack Dual (Électricité + Gaz)"))
 
             def map_d(o):
-                return [P(o.get("provider") or "—"), P(o.get("offer_name") or "—"), PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
+                provider_name = dual_map.get(o["provider"], o["provider"]) if anonymous else o["provider"]
+                return [P(provider_name), P(o["offer_name"]), PR(f"<b>{_fmt_euro(o['total_annuel_estime'])}</b>")]
 
             thead = [P("Fournisseur"), P("Offres combinées"), PR("Total estimé (élec+gaz)")]
             story.append(create_modern_table([thead] + [map_d(o) for o in combined_dual[:3]], cw(1.3, 3.0, 1.2),
